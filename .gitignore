@@ -10,16 +10,17 @@ dependency-reduced-pom.xml
 buildNumber.properties
 
 # ===== 海康官方 SDK 二进制文件（禁止提交，需自行放入） =====
-sdk/
-lib/
+# 注意：必须带前导斜杠，只忽略项目根目录下的 sdk/，不要误伤 src/main/java/com/hiki/isup/sdk 源码包
+/sdk/
+/lib/
 *.so
 *.dll
 *.dylib
-HCAapSDKCom/
+/HCAapSDKCom/
 
 # ===== 运行期数据 =====
-data/
-logs/
+/data/
+/logs/
 *.log
 EHomeSDKLog/
 SdkLog/
