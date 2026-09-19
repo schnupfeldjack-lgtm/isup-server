@@ -119,6 +119,31 @@ ffmpeg -version
 
 默认 SDK 目录：`./sdk`（可用 `ISUP_SDK_DIR` 覆盖，建议使用绝对路径）。
 
+### 5.1 下载地址
+
+直达链接（海康开放平台 · 下载中心 · **ISUP SDK**）：
+
+```
+https://open.hikvision.com/download/5cda567cf47ae80dd41a54b3?type=10&id=18e1e779efed4593bfceba6703d7f6a8
+```
+
+手工导航路径：`https://open.hikvision.com` → **下载中心** → 左侧分类选 **ISUP SDK**。
+
+页面提供 5 个包，按部署环境选：
+
+| 包 | 版本（2026-09 查） | 用途 |
+|----|-------------------|------|
+| ISUP SDK_Linux64 | V2.5.1.35_build20241101 | **生产部署（阿里云 ECS x86_64）下这个** |
+| ISUP SDK_Win64 | V2.5.1.35_build20241101 | 本地 Windows 调试 |
+| ISUP SDK_Win32 / Linux32 | V2.5.1.35_build20241101 | 32 位环境 |
+| ISUP SDK_ArmLinux64 | V2.5.1.40_build20241225 | armV8 架构 |
+
+> 点击「立即下载」通常需要登录海康开放平台账号（免费注册）。页面上的「开发指南」「示例下载」一并拿走，
+> 里面的 Java Demo 可以和本项目的 `sdk/` 包结构体定义互相印证。
+
+**别下错 SDK**：开放平台上还有个「设备网络 SDK」（`HCNetSDK.dll` / `libhcnetsdk.so`），那是**平台主动连接设备**用的，
+本项目是**设备主动注册到平台**（ISUP / 原 EHome），要的是 `HCISUPCMS` / `HCISUPStream` 这两个库。文件名对不上就是下错了。
+
 ### Linux x86_64（生产部署以此为准）
 
 ```
@@ -129,6 +154,17 @@ sdk/
 ├── libssl.so
 └── HCAapSDKCom/          # 组件库目录（里面还有若干 .so）
 ```
+
+> `NativeSdkLoader` 是按**上面这些文件名**去 `sdk-dir` 里找的，一个字都不能差。
+> 海康包里的 OpenSSL 常带版本号（`libcrypto.so.1.1` / `libssl.so.1.1`），必须改名或建软链，否则启动报「缺少海康 SDK 文件 libcrypto.so」：
+>
+> ```bash
+> cd /opt/isup-server/sdk
+> ln -s libcrypto.so.1.1 libcrypto.so
+> ln -s libssl.so.1.1    libssl.so
+> ```
+>
+> `HCAapSDKCom/` 要在解压后的包里找（有的包放在子目录下），**整目录**拷进 `sdk/`，少了它 SDK 能初始化但设备注册不进来。
 
 ### Windows（本地调试用）
 
