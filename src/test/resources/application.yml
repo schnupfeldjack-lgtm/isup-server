@@ -1,0 +1,41 @@
+server:
+  port: 0
+
+isup:
+  # 测试环境不加载真实海康 SDK
+  enabled: false
+  sdk-dir: ./sdk
+  public-ip: 203.0.113.10
+  ehome-key: test-ehome-key
+  api-key: test-api-key
+  ffmpeg-path: ffmpeg
+  media-dir: target/test-media
+  link-mode: 0
+
+  cms:
+    listen-ip: 0.0.0.0
+    listen-port: 7660
+
+  stream:
+    listen-ip: 0.0.0.0
+    preview-port: 8003
+    playback-port: 8004
+
+  ffmpeg:
+    ps-input-format: mpeg
+    codec-args: -c copy
+    hls-time: 2
+    hls-list-size: 6
+    hls-flags: delete_segments+append_list
+    mp4-args: -f mp4 -movflags +frag_keyframe+empty_moov
+    log-level: error
+
+  session:
+    start-timeout-sec: 30
+    idle-timeout-sec: 120
+    download-max-sec: 3600
+
+logging:
+  level:
+    root: WARN
+    com.hiki.isup: INFO
