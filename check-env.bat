@@ -4,8 +4,8 @@ cd /d %~dp0
 setlocal enabledelayedexpansion
 
 rem ============================================================
-rem  isup-server çŽ¯å¢ƒè‡ªæ£€ï¼ˆåªæ£€æŸ¥ï¼Œä¸å¯åŠ¨æœåŠ¡ï¼‰
-rem  ä¸Ž start.bat äº’è¡¥ï¼šstart.bat åªç®¡å¯åŠ¨ï¼Œè¿™ä¸ªè„šæœ¬è´Ÿè´£æŠŠçŽ¯å¢ƒæ¯›ç—…ä¸€æ¬¡æŒ‘å‡ºæ¥
+rem  isup-server »·¾³×Ô¼ì£¨Ö»¼ì²é£¬²»Æô¶¯·þÎñ£©
+rem  Óë start.bat »¥²¹£ºstart.bat Ö»¹ÜÆô¶¯£¬Õâ¸ö½Å±¾¸ºÔð°Ñ»·¾³Ã«²¡Ò»´ÎÌô³öÀ´
 rem ============================================================
 
 set "JAR=target\isup-server-1.0.0.jar"
@@ -13,30 +13,30 @@ set "CFG=config\application.yml"
 set "ERR=0"
 
 echo ============================================================
-echo  isup-server çŽ¯å¢ƒè‡ªæ£€
+echo  isup-server »·¾³×Ô¼ì
 echo ============================================================
 
-rem ---------- 1. æœåŠ¡åŒ… ----------
-echo [1/6] æœåŠ¡åŒ…
+rem ---------- 1. ·þÎñ°ü ----------
+echo [1/6] ·þÎñ°ü
 if not exist "%JAR%" (
-    echo      [å¤±è´¥] æ‰¾ä¸åˆ° %JAR% â€”â€” å…ˆè·‘ mvn clean package -DskipTests
+    echo      [Ê§°Ü] ÕÒ²»µ½ %JAR% ¡ª¡ª ÏÈÅÜ mvn clean package -DskipTests
     set "ERR=1"
 ) else (
-    echo      [æ­£å¸¸] %JAR%
+    echo      [Õý³£] %JAR%
 )
 
 rem ---------- 2. Java ----------
 echo [2/6] Java
 java -version >nul 2>&1
 if errorlevel 1 (
-    echo      [å¤±è´¥] java ä¸å¯ç”¨ï¼Œéœ€è¦ JDK 21
+    echo      [Ê§°Ü] java ²»¿ÉÓÃ£¬ÐèÒª JDK 21
     set "ERR=1"
 ) else (
-    for /f "tokens=3" %%v in ('java -version 2^>^&1 ^| findstr /r "version"') do echo      [æ­£å¸¸] %%~v
+    for /f "tokens=3" %%v in ('java -version 2^>^&1 ^| findstr /r "version"') do echo      [Õý³£] %%~v
 )
 
 rem ---------- 3. SDK ----------
-echo [3/6] æµ·åº· SDKï¼ˆsdk\ï¼‰
+echo [3/6] º£¿µ SDK£¨sdk\£©
 set "SDK_MISS="
 if not exist "sdk\HCISUPCMS.dll"    set "SDK_MISS=!SDK_MISS! HCISUPCMS.dll"
 if not exist "sdk\HCISUPStream.dll" set "SDK_MISS=!SDK_MISS! HCISUPStream.dll"
@@ -44,17 +44,17 @@ if not exist "sdk\libeay32.dll"     set "SDK_MISS=!SDK_MISS! libeay32.dll"
 if not exist "sdk\ssleay32.dll"     set "SDK_MISS=!SDK_MISS! ssleay32.dll"
 if not exist "sdk\HCAapSDKCom"      set "SDK_MISS=!SDK_MISS! HCAapSDKCom/"
 if defined SDK_MISS (
-    echo      [å¤±è´¥] ç¼ºå°‘ï¼š!SDK_MISS!
-    echo             ä»Ž ISUP SDK_Win64 åŒ…çš„ lib64\ ç›®å½•æ•´åŒ…æ‹·è¿›æ¥
+    echo      [Ê§°Ü] È±ÉÙ£º!SDK_MISS!
+    echo             ´Ó ISUP SDK_Win64 °üµÄ lib64\ Ä¿Â¼Õû°ü¿½½øÀ´
     set "ERR=1"
 ) else (
-    echo      [æ­£å¸¸] HCISUPCMS.dll HCISUPStream.dll libeay32.dll ssleay32.dll HCAapSDKCom\
+    echo      [Õý³£] HCISUPCMS.dll HCISUPStream.dll libeay32.dll ssleay32.dll HCAapSDKCom\
 )
 
-rem ---------- 4. é…ç½® ----------
-echo [4/6] é…ç½®ï¼ˆconfig\application.ymlï¼‰
+rem ---------- 4. ÅäÖÃ ----------
+echo [4/6] ÅäÖÃ£¨config\application.yml£©
 if not exist "%CFG%" (
-    echo      [å¤±è´¥] æ²¡æœ‰ %CFG%
+    echo      [Ê§°Ü] Ã»ÓÐ %CFG%
     set "ERR=1"
 ) else (
     for /f "tokens=1,* delims=:" %%a in ('findstr /r "ffmpeg-path:" "%CFG%"') do set "FFMPEG=%%b"
@@ -67,34 +67,34 @@ if not exist "%CFG%" (
     if defined PUBIP    if "!PUBIP:~0,1!"==" "    set "PUBIP=!PUBIP:~1!"
     if defined APIKEY   if "!APIKEY:~0,1!"==" "   set "APIKEY=!APIKEY:~1!"
 
-    if exist "!FFMPEG!" (echo      [æ­£å¸¸] ffmpegï¼š!FFMPEG!) else (echo      [è­¦å‘Š] ffmpeg ä¸å¯ç”¨ï¼š!FFMPEG!)
-    if "!EHOMEKEY!"=="CHANGE_ME_EHOME_KEY" (echo      [è­¦å‘Š] ehome-key ä»æ˜¯å ä½å€¼ï¼Œè®¾å¤‡æ³¨å†Œä¼šè¢«æ‹’ç») else (echo      [æ­£å¸¸] ehome-key å·²é…ç½®)
-    if "!PUBIP!"=="" (echo      [å¤±è´¥] public-ip æœªé…ç½® & set "ERR=1") else (echo      [æ­£å¸¸] public-ipï¼š!PUBIP!)
-    if "!APIKEY!"=="" (echo      [å¤±è´¥] api-key æœªé…ç½® & set "ERR=1") else (echo      [æ­£å¸¸] api-key å·²é…ç½®)
+    if exist "!FFMPEG!" (echo      [Õý³£] ffmpeg£º!FFMPEG!) else (echo      [¾¯¸æ] ffmpeg ²»¿ÉÓÃ£º!FFMPEG!)
+    if "!EHOMEKEY!"=="CHANGE_ME_EHOME_KEY" (echo      [¾¯¸æ] ehome-key ÈÔÊÇÕ¼Î»Öµ£¬Éè±¸×¢²á»á±»¾Ü¾ø) else (echo      [Õý³£] ehome-key ÒÑÅäÖÃ)
+    if "!PUBIP!"=="" (echo      [Ê§°Ü] public-ip Î´ÅäÖÃ & set "ERR=1") else (echo      [Õý³£] public-ip£º!PUBIP!)
+    if "!APIKEY!"=="" (echo      [Ê§°Ü] api-key Î´ÅäÖÃ & set "ERR=1") else (echo      [Õý³£] api-key ÒÑÅäÖÃ)
 )
 
-rem ---------- 5. ç«¯å£ ----------
-echo [5/6] ç«¯å£å ç”¨
+rem ---------- 5. ¶Ë¿Ú ----------
+echo [5/6] ¶Ë¿ÚÕ¼ÓÃ
 set "PORT_BUSY="
 for %%p in (7660 8003 8004 8080) do (
     netstat -ano | findstr /r /c:":%%p .*LISTENING" >nul
     if not errorlevel 1 set "PORT_BUSY=!PORT_BUSY! %%p"
 )
-if defined PORT_BUSY (echo      [è­¦å‘Š] å·²è¢«å ç”¨ï¼š!PORT_BUSY! â€”â€” æœåŠ¡ä¼šèµ·ä¸æ¥) else (echo      [æ­£å¸¸] 7660 8003 8004 8080 å‡ç©ºé—²)
+if defined PORT_BUSY (echo      [¾¯¸æ] ÒÑ±»Õ¼ÓÃ£º!PORT_BUSY! ¡ª¡ª ·þÎñ»áÆð²»À´) else (echo      [Õý³£] 7660 8003 8004 8080 ¾ù¿ÕÏÐ)
 
-rem ---------- 6. é˜²ç«å¢™ ----------
-echo [6/6] é˜²ç«å¢™ï¼ˆè®¾å¤‡å›žè¿žéœ€è¦ï¼‰
+rem ---------- 6. ·À»ðÇ½ ----------
+echo [6/6] ·À»ðÇ½£¨Éè±¸»ØÁ¬ÐèÒª£©
 netsh advfirewall firewall show rule name="ISUP-CMS-7660" >nul 2>&1
 if errorlevel 1 (
-    echo      [è­¦å‘Š] æ²¡æ‰¾åˆ° 7660 å…¥ç«™æ”¾è¡Œè§„åˆ™ï¼Œè®¾å¤‡å¯èƒ½è¿žä¸è¿›æ¥
-    echo             ç®¡ç†å‘˜ç»ˆç«¯æ‰§è¡Œï¼ˆ8003/8004 åŒç†ï¼‰ï¼š
+    echo      [¾¯¸æ] Ã»ÕÒµ½ 7660 ÈëÕ¾·ÅÐÐ¹æÔò£¬Éè±¸¿ÉÄÜÁ¬²»½øÀ´
+    echo             ¹ÜÀíÔ±ÖÕ¶ËÖ´ÐÐ£¨8003/8004 Í¬Àí£©£º
     echo             netsh advfirewall firewall add rule name="ISUP-CMS-7660" dir=in action=allow protocol=TCP localport=7660
 ) else (
-    echo      [æ­£å¸¸] å·²å­˜åœ¨ ISUP-CMS-7660 æ”¾è¡Œè§„åˆ™
+    echo      [Õý³£] ÒÑ´æÔÚ ISUP-CMS-7660 ·ÅÐÐ¹æÔò
 )
 
 echo ============================================================
-if "%ERR%"=="1" (echo  ç»“è®ºï¼šæœ‰ [å¤±è´¥] é¡¹ï¼Œä¿®å®Œå†å¯åŠ¨) else (echo  ç»“è®ºï¼šå¯ä»¥å¯åŠ¨ï¼ˆ[è­¦å‘Š] é¡¹ä¸å½±å“å¯åŠ¨ï¼Œä½†ä¼šå½±å“åŠŸèƒ½ï¼‰)
+if "%ERR%"=="1" (echo  ½áÂÛ£ºÓÐ [Ê§°Ü] Ïî£¬ÐÞÍêÔÙÆô¶¯) else (echo  ½áÂÛ£º¿ÉÒÔÆô¶¯£¨[¾¯¸æ] Ïî²»Ó°ÏìÆô¶¯£¬µ«»áÓ°Ïì¹¦ÄÜ£©)
 echo ============================================================
 endlocal
 pause

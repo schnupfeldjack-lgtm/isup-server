@@ -3,26 +3,26 @@ chcp 65001 >nul
 cd /d %~dp0
 
 rem ==========================================
-rem  ISUP Server å¯åŠ¨è„šæœ¬ï¼ˆWindowsï¼‰
-rem  é…ç½®åœ¨ config/application.yml ä¸­ä¿®æ”¹
+rem  ISUP Server Æô¶¯½Å±¾£¨Windows£©
+rem  ÅäÖÃÔÚ config/application.yml ÖĞĞŞ¸Ä
 rem ==========================================
 
 if not exist "target\isup-server-1.0.0.jar" (
-    echo æœªæ‰¾åˆ° target\isup-server-1.0.0.jar
-    echo è¯·å…ˆæ‰§è¡Œ: mvn clean package -DskipTests
+    echo Î´ÕÒµ½ target\isup-server-1.0.0.jar
+    echo ÇëÏÈÖ´ĞĞ: mvn clean package -DskipTests
     pause
     exit /b 1
 )
 
 if not exist "sdk" (
-    echo [è­¦å‘Š] æœªæ‰¾åˆ° sdk ç›®å½•ï¼Œæµ·åº· SDK æœªæ”¾ç½®ï¼Œè®¾å¤‡å°†æ— æ³•æ³¨å†Œ
-    echo è¯·å°† libHCISUPCMS.so / HCISUPCMS.dll ç­‰æ–‡ä»¶æ”¾å…¥ sdk\
+    echo [¾¯¸æ] Î´ÕÒµ½ sdk Ä¿Â¼£¬º£¿µ SDK Î´·ÅÖÃ£¬Éè±¸½«ÎŞ·¨×¢²á
+    echo Çë½« libHCISUPCMS.so / HCISUPCMS.dll µÈÎÄ¼ş·ÅÈë sdk\
     echo.
 )
 
-echo å¯åŠ¨ ISUP Server...
-echo é…ç½®æ–‡ä»¶: config\application.yml
-echo å¥åº·æ£€æŸ¥: http://127.0.0.1:8080/api/health
+echo Æô¶¯ ISUP Server...
+echo ÅäÖÃÎÄ¼ş: config\application.yml
+echo ½¡¿µ¼ì²é: http://127.0.0.1:8080/api/health
 java -jar target\isup-server-1.0.0.jar
 
 pause
