@@ -20,12 +20,24 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 /**
  * HTTP API 测试：鉴权、参数校验、状态查询。
  * 该测试不加载海康 SDK（isup.enabled=false），只验证接口契约。
+ *
+ * <p>这里的 properties 是<b>内联测试属性</b>，优先级高于一切 config data（包括
+ * {@code src/test/resources/application.yml} 和开发者本地 {@code ./config/application.yml}）。
+ * 必须写在这里：本机根目录的 config/application.yml 会被 Spring Boot 自动加载且优先级更高，
+ * 若不内联覆盖，isup.api-key 会变成真实配置里的值，导致全部业务接口用例拿到 401。</p>
  */
-@SpringBootTest
+@SpringBootTest(properties = {
+        "isup.enabled=false",
+        "isup.api-key=" + IsupApiWebTest.API_KEY,
+        "isup.public-ip=203.0.113.10",
+        "isup.ehome-key=test-ehome-key",
+        "isup.media-dir=target/test-media"
+})
 @AutoConfigureMockMvc
 class IsupApiWebTest {
 
-    private static final String API_KEY = "test-api-key";
+    /** 包级可见：注解（位于类体作用域之外）需要引用它作常量表达式 */
+    static final String API_KEY = "test-api-key";
 
     @Autowired
     private MockMvc mockMvc;

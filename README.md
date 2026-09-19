@@ -705,6 +705,10 @@ mvn clean package -DskipTests
 
 > 真实 ISUP SDK 需要 native library 和真实设备，CI 中不连接设备。
 
+> **注意**：Spring Boot 会自动加载 jar 同级的 `config/application.yml`，其优先级**高于** `src/test/resources/application.yml`。
+> 所以 `IsupApiWebTest` 用 `@SpringBootTest(properties = {...})` 内联钉住 `api-key` / `public-ip` 等关键配置，
+> 否则本机那份真实配置会把测试期望值覆盖掉，业务接口用例全部退化成 401。新增集成测试时同理。
+
 ---
 
 ## 15. 并发与资源释放说明
