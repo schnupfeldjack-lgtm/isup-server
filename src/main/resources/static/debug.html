@@ -43,6 +43,7 @@
     font-size: 13px; font-family: inherit;
   }
   input:focus, select:focus { outline: none; border-color: var(--accent); }
+  input.input-error { border-color: var(--err); box-shadow: 0 0 0 2px rgba(242,109,109,.18); }
   button {
     padding: 7px 14px; background: var(--panel-2); color: var(--text);
     border: 1px solid var(--border); border-radius: 5px;
@@ -247,6 +248,31 @@ function esc(s) {
   return String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 }
 
+/** 401 时把 API Key 输入框标红并给出明确指引，避免只看到一句「缺少 X-API-Key 请求头」不知道怎么办 */
+function flagKeyError() {
+  keyEl.classList.add('input-error');
+  keyEl.focus();
+  log('提示：在页面顶部「API Key」框填入 isup.api-key（本机在 config/application.yml 里），填一次会自动记住', 'log-err');
+}
+
+/** 必填项为空时标红对应输入框 */
+function flagEmpty(id, name) {
+  const el = $(id);
+  el.classList.add('input-error');
+  el.focus();
+  log(`${name} 不能为空${sessionListHint()}`,
+      'log-err');
+}
+
+function sessionListHint() {
+  return '（可点上方的在线设备列表自动填入；列表为空说明设备还没注册上来）';
+}
+
+/** 输入时清掉标红 */
+document.addEventListener('input', e => {
+  if (e.target && e.target.classList) e.target.classList.remove('input-error');
+});
+
 /* ---------- HTTP ---------- */
 async function api(path, options) {
   const opt = options || {};
@@ -268,6 +294,7 @@ async function api(path, options) {
   if (!res.ok) {
     const msg = data && data.message ? data.message : text;
     log(`✗ ${res.status} ${esc(msg)}`, 'log-err');
+    if (res.status === 401) flagKeyError();
     throw new Error(`${res.status} ${msg}`);
   }
   log(`✓ ${res.status} ${JSON.stringify(data).slice(0, 400)}`, 'log-ok');
@@ -381,7 +408,7 @@ async function startPreview() {
     channel: Number($('pv-channel').value),
     streamType: Number($('pv-stream').value)
   };
-  if (!body.deviceId) { log('deviceId 不能为空', 'log-err'); return; }
+  if (!body.deviceId) { flagEmpty('pv-device', 'deviceId'); return; }
   const lm = $('pv-link').value;
   if (lm !== '') body.linkMode = Number(lm);
   try {
@@ -399,7 +426,11 @@ async function startPlayback() {
     startTime: $('pb-start').value.trim(),
     endTime: $('pb-end').value.trim()
   };
-  if (!body.deviceId || !body.startTime || !body.endTime) { log('deviceId / 开始 / 结束 都要填', 'log-err'); return; }
+  if (!body.deviceId || !body.startTime || !body.endTime) {
+    if (!body.deviceId) flagEmpty('pb-device', 'deviceId');
+    else flagEmpty(body.startTime ? 'pb-end' : 'pb-start', body.startTime ? '结束时间' : '开始时间');
+    return;
+  }
   try {
     const r = await api('/api/v1/playback', { method: 'POST', body: JSON.stringify(body) });
     currentSession = { sessionId: r.sessionId, playUrl: r.playUrl };
@@ -427,7 +458,11 @@ async function startDownload() {
     startTime: $('dl-start').value.trim(),
     endTime: $('dl-end').value.trim()
   };
-  if (!body.deviceId || !body.startTime || !body.endTime) { log('deviceId / 开始 / 结束 都要填', 'log-err'); return; }
+  if (!body.deviceId || !body.startTime || !body.endTime) {
+    if (!body.deviceId) flagEmpty('dl-device', 'deviceId');
+    else flagEmpty(body.startTime ? 'dl-end' : 'dl-start', body.startTime ? '结束时间' : '开始时间');
+    return;
+  }
   $('dl-save').disabled = true;
   try {
     const r = await api('/api/v1/download', { method: 'POST', body: JSON.stringify(body) });
