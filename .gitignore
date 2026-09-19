@@ -1,0 +1,39 @@
+# ===== Maven =====
+target/
+!.mvn/wrapper/maven-wrapper.jar
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+
+# ===== 海康官方 SDK 二进制文件（禁止提交，需自行放入） =====
+sdk/
+lib/
+*.so
+*.dll
+*.dylib
+HCAapSDKCom/
+
+# ===== 运行期数据 =====
+data/
+logs/
+*.log
+EHomeSDKLog/
+SdkLog/
+
+# ===== IDE =====
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.classpath
+.project
+
+# ===== OS =====
+.DS_Store
+Thumbs.db

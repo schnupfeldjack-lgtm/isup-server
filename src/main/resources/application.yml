@@ -1,0 +1,82 @@
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: isup-server
+  jackson:
+    default-property-inclusion: non_null
+
+# ============================================================
+# ISUP 服务配置
+# 所有配置项均可通过环境变量覆盖（阿里云部署推荐用环境变量）
+# ============================================================
+isup:
+  # 是否在启动时初始化海康 SDK 并开启监听。
+  # 单元测试 / 本地无 SDK 环境可设为 false，HTTP API 仍可启动。
+  enabled: ${ISUP_ENABLED:true}
+
+  # 海康 SDK 动态库目录（绝对路径或相对于工作目录）
+  sdk-dir: ${ISUP_SDK_DIR:./sdk}
+
+  # 公网 IP：返回给设备、让设备回连的地址。
+  # 绝对不能填 0.0.0.0 / 127.0.0.1。
+  public-ip: ${ISUP_PUBLIC_IP:}
+
+  # ISUP 5.0 接入密钥：必须与录像机上配置的密钥一致
+  ehome-key: ${ISUP_EHOME_KEY:}
+
+  # ERP 调用 HTTP API 时的 X-API-Key
+  api-key: ${ERP_API_KEY:}
+
+  # ffmpeg 可执行文件路径
+  ffmpeg-path: ${FFMPEG_PATH:ffmpeg}
+
+  # 媒体文件输出根目录（HLS 切片、下载的 MP4）
+  media-dir: ${ISUP_MEDIA_DIR:./data/media}
+
+  # 取流链路模式：0-TCP，1-UDP，2-HRUDP。公网环境固定用 0
+  link-mode: ${ISUP_LINK_MODE:0}
+
+  # ===== CMS 注册服务（TCP 7660）=====
+  cms:
+    # 本地监听地址，公网/多网卡服务器填 0.0.0.0
+    listen-ip: ${ISUP_CMS_LISTEN_IP:0.0.0.0}
+    listen-port: ${ISUP_CMS_LISTEN_PORT:7660}
+
+  # ===== 流媒体监听（TCP 8003 预览 / 8004 回放下载）=====
+  stream:
+    listen-ip: ${ISUP_STREAM_LISTEN_IP:0.0.0.0}
+    preview-port: ${ISUP_PREVIEW_PORT:8003}
+    playback-port: ${ISUP_PLAYBACK_PORT:8004}
+
+  # ===== FFmpeg 参数 =====
+  ffmpeg:
+    # ISUP PS 码流的输入封装格式（ffmpeg demuxer 名称）
+    ps-input-format: ${ISUP_FFMPEG_PS_INPUT_FORMAT:mpeg}
+    # 编码处理方式，默认不转码，直接 copy
+    codec-args: ${ISUP_FFMPEG_CODEC_ARGS:-c copy}
+    # HLS 切片时长（秒）
+    hls-time: ${ISUP_FFMPEG_HLS_TIME:2}
+    # HLS 播放列表保留的切片数量
+    hls-list-size: ${ISUP_FFMPEG_HLS_LIST_SIZE:6}
+    # HLS 附加参数
+    hls-flags: ${ISUP_FFMPEG_HLS_FLAGS:delete_segments+append_list}
+    # MP4 附加参数（frag 参数保证进程被中断时文件仍可播放）
+    mp4-args: ${ISUP_FFMPEG_MP4_ARGS:-f mp4 -movflags +frag_keyframe+empty_moov}
+    # ffmpeg 日志级别
+    log-level: ${ISUP_FFMPEG_LOG_LEVEL:error}
+
+  # ===== 会话与超时 =====
+  session:
+    # 发起预览/回放后，等待设备回连并推流的最长时间（秒），超时判定 FAILED
+    start-timeout-sec: ${ISUP_SESSION_START_TIMEOUT_SEC:30}
+    # 运行中的会话，超过该时间没有任何码流数据则判定 FAILED（秒）
+    idle-timeout-sec: ${ISUP_SESSION_IDLE_TIMEOUT_SEC:120}
+    # 下载任务最大时长（秒）
+    download-max-sec: ${ISUP_SESSION_DOWNLOAD_MAX_SEC:3600}
+
+logging:
+  level:
+    root: INFO
+    com.hiki.isup: INFO

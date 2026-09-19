@@ -1,0 +1,4 @@
+# HLS 播放所需的 MIME 类型补充
+# Spring 的 MediaTypeFactory 会从 classpath 加载所有 META-INF/mime.types
+application/vnd.apple.mpegurl m3u8
+video/mp2t ts
