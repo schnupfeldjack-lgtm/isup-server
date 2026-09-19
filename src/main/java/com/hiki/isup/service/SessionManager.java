@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -56,6 +57,17 @@ public class SessionManager {
                 t.setDaemon(true);
                 return t;
             });
+
+    /**
+     * 停止线程池：SDK 回调线程（回放结束信令、设备下线回调）内不能直接调用
+     * NET_ESTREAM_StopPlayBack / NET_ECMS_StopPlayBack 等接口，否则可能出现重入死锁。
+     * 因此由 SDK 回调触发的停止操作统一丢到这个独立线程执行。
+     */
+    private final ExecutorService stopExecutor = Executors.newFixedThreadPool(2, r -> {
+        Thread t = new Thread(r, "isup-session-stop");
+        t.setDaemon(true);
+        return t;
+    });
 
     /** 下载任务完成后等待 ffmpeg 收尾的时间（秒） */
     private static final int FFMPEG_GRACE_SECONDS = 30;
@@ -175,6 +187,54 @@ public class SessionManager {
         session.runReleaseHook();
         session.setStatus(targetStatus);
         log.info("会话已停止：sessionId={}, status={}", session.getSessionId(), targetStatus);
+    }
+
+    /**
+     * 由 SDK 回调线程触发的停止：异步执行，避免在回调线程内重入 SDK 导致死锁。
+     */
+    public void stopAsync(MediaSession session, SessionStatus targetStatus, String reason) {
+        if (session == null) {
+            return;
+        }
+        stopExecutor.submit(() -> {
+            try {
+                stop(session, targetStatus, reason);
+            } catch (Exception e) {
+                log.error("异步停止会话失败：sessionId={}", session.getSessionId(), e);
+            }
+        });
+    }
+
+    /**
+     * 由 SDK 回放结束信令触发的下载收尾：异步执行。
+     */
+    public void finishDownloadAsync(MediaSession session, String reason) {
+        if (session == null) {
+            return;
+        }
+        stopExecutor.submit(() -> {
+            try {
+                finishDownload(session, reason);
+            } catch (Exception e) {
+                log.error("异步收尾下载任务失败：sessionId={}", session.getSessionId(), e);
+            }
+        });
+    }
+
+    /**
+     * 设备下线时，停止该设备的全部会话（由注册回调触发，异步执行）。
+     */
+    public void stopByDeviceAsync(String deviceId) {
+        if (deviceId == null) {
+            return;
+        }
+        stopExecutor.submit(() -> {
+            try {
+                stopByDevice(deviceId);
+            } catch (Exception e) {
+                log.error("异步停止设备会话失败：deviceId={}", deviceId, e);
+            }
+        });
     }
 
     /**
@@ -449,6 +509,7 @@ public class SessionManager {
     @PreDestroy
     public void shutdown() {
         watchdog.shutdownNow();
+        stopExecutor.shutdownNow();
         stopAll("服务关闭");
         for (Map.Entry<String, MediaSession> entry : sessions.entrySet()) {
             isupSessionIndex.remove(indexKey(entry.getValue().getType(), entry.getValue().getIsupSessionId()));

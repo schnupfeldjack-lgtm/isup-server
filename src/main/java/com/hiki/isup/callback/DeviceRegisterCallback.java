@@ -179,7 +179,8 @@ public class DeviceRegisterCallback implements HCISUPCMS.DEVICE_REGISTER_CB {
     private void handleOffline(int lUserID) {
         String deviceId = deviceRegistry.offline(lUserID);
         if (deviceId != null) {
-            sessionManager.stopByDevice(deviceId);
+            // 当前处于 SDK 注册回调线程，异步停止，避免在回调内重入 SDK
+            sessionManager.stopByDeviceAsync(deviceId);
         }
     }
 

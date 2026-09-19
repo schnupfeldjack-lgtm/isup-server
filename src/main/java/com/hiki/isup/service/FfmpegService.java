@@ -54,13 +54,7 @@ public class FfmpegService {
         command.add("-hide_banner");
         command.add("-loglevel");
         command.add(cfg.getLogLevel());
-        // ISUP PS 流常缺少 PTS，让 ffmpeg 自动生成
-        command.add("-fflags");
-        command.add("+genpts");
-        command.add("-f");
-        command.add(cfg.getPsInputFormat());
-        command.add("-i");
-        command.add("pipe:0");
+        appendInputArgs(command, cfg);
         command.addAll(splitArgs(cfg.getCodecArgs()));
         command.add("-f");
         command.add("hls");
@@ -86,16 +80,34 @@ public class FfmpegService {
         command.add("-hide_banner");
         command.add("-loglevel");
         command.add(cfg.getLogLevel());
-        command.add("-fflags");
-        command.add("+genpts");
-        command.add("-f");
-        command.add(cfg.getPsInputFormat());
-        command.add("-i");
-        command.add("pipe:0");
+        appendInputArgs(command, cfg);
         command.addAll(splitArgs(cfg.getCodecArgs()));
         command.addAll(splitArgs(cfg.getMp4Args()));
         command.add(file.toString());
         return command;
+    }
+
+    /**
+     * 输入侧参数：码流通过 stdin 管道进入，是非 seekable 输入，
+     * 必须给足探测数据，否则 ffmpeg 可能把 PS 里的私有流误判成音频流导致失败。
+     *
+     * <p>ps-input-format 填 auto 或留空时不指定 -f，交给 ffmpeg 自动探测。</p>
+     */
+    private static void appendInputArgs(List<String> command, IsupProperties.Ffmpeg cfg) {
+        command.add("-analyzeduration");
+        command.add("2000000");
+        command.add("-probesize");
+        command.add("2000000");
+        // ISUP PS 流常缺少 PTS，让 ffmpeg 自动生成
+        command.add("-fflags");
+        command.add("+genpts");
+        String inputFormat = cfg.getPsInputFormat();
+        if (inputFormat != null && !inputFormat.isBlank() && !"auto".equalsIgnoreCase(inputFormat.trim())) {
+            command.add("-f");
+            command.add(inputFormat.trim());
+        }
+        command.add("-i");
+        command.add("pipe:0");
     }
 
     /**
@@ -116,8 +128,10 @@ public class FfmpegService {
         ProcessBuilder builder = new ProcessBuilder(command);
         builder.redirectErrorStream(false);
         if (workDir != null) {
+            // 只负责创建输出目录，不把它设为子进程工作目录：
+            // 命令里的输出路径是相对当前 JVM 工作目录解析的，
+            // 若同时设置 working directory，相对路径会被二次拼接导致文件打不开。
             Files.createDirectories(workDir);
-            builder.directory(workDir.toFile());
         }
         String commandLine = FfmpegProcess.toCommandLine(command);
         log.info("启动 ffmpeg，sessionId={}, 命令={}", sessionId, commandLine);

@@ -142,6 +142,21 @@ class SessionManagerTest {
     }
 
     @Test
+    @DisplayName("异步停止（SDK 回调线程用）最终也会让会话进入终态")
+    void stopAsyncEventuallyFinishes() throws Exception {
+        MediaSession session = sessionManager.create(SessionType.PLAYBACK, "GW4206623", 1);
+
+        sessionManager.stopAsync(session, SessionStatus.COMPLETED, "回放结束");
+
+        long deadline = System.currentTimeMillis() + 3000;
+        while (System.currentTimeMillis() < deadline && !session.isFinished()) {
+            Thread.sleep(20);
+        }
+        assertEquals(SessionStatus.COMPLETED, session.getStatus());
+        assertTrue(session.isFinished());
+    }
+
+    @Test
     @DisplayName("releaseHook 只在会话结束时执行一次")
     void releaseHookRunsOnce() {
         MediaSession session = sessionManager.create(SessionType.PREVIEW, "GW4206623", 1);

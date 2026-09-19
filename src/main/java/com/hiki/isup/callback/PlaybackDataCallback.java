@@ -81,10 +81,11 @@ public class PlaybackDataCallback implements HCISUPStream.PLAYBACK_DATA_CB {
         if (session.isFinished()) {
             return;
         }
+        // 注意：当前处于 SDK 回调线程，必须异步停止，不能在回调里重入 SDK
         if (session.getType() == SessionType.DOWNLOAD) {
-            sessionManager.finishDownload(session, null);
+            sessionManager.finishDownloadAsync(session, null);
         } else {
-            sessionManager.stop(session, SessionStatus.COMPLETED, "回放结束");
+            sessionManager.stopAsync(session, SessionStatus.COMPLETED, "回放结束");
         }
     }
 

@@ -109,7 +109,20 @@ ffmpeg -version
 
 - 服务只做**封装转换，不转码**（默认 `-c copy`），CPU 占用很低
 - ISUP 码流为 PS 封装，ffmpeg 以 `-f mpeg` 从 stdin 读取
-- 若 `ffmpeg` 不在 PATH 中，用 `ISUP_FFMPEG_PATH=/usr/local/bin/ffmpeg` 指定
+- 若 `ffmpeg` 不在 PATH 中，用 `ISUP_FFMPEG_PATH=/usr/local/bin/ffmpeg` 指定，
+  或直接在 `config/application.yml` 里把 `isup.ffmpeg-path` 写成绝对路径
+  （例如 Windows：`C:/Users/15515/ffmpeg/bin/ffmpeg.exe`）
+
+Windows 安装：
+
+```powershell
+winget install --id Gyan.FFmpeg -e
+```
+
+> winget 有时会卡在创建符号链接这一步（报 `create_symlink` 错误），
+> 此时 ffmpeg 其实已经解压到了
+> `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg_...\ffmpeg-x.x.x-full_build\bin\ffmpeg.exe`，
+> 把它复制到一个固定目录并在 `isup.ffmpeg-path` 里填绝对路径即可。
 
 ---
 
@@ -707,7 +720,17 @@ server {
 - MP4 封装不支持设备音频编码时，把 `isup.ffmpeg.codec-args` 改成 `-c:v copy -c:a aac`
 - 时间跨度过大被拒绝（单次上限 24 小时）
 
-### 13.6 服务启动失败
+### 13.6 ffmpeg 报 `Could not find codec parameters` / 一直不出切片
+
+码流从 stdin 管道进入 ffmpeg 时是非 seekable 输入，偶发探测失败
+（表现为把 PS 私有流误判成音频流：`Audio: mp3 ... Header missing`）。
+已内置 `-analyzeduration 2000000 -probesize 2000000` 缓解，若仍失败：
+
+1. 把 `isup.ffmpeg.ps-input-format` 改成 `auto`（不指定 `-f`，交给 ffmpeg 自动探测）后重启
+2. 查看 ffmpeg 的 stderr（日志中以 `[ffmpeg][sessionId]` 前缀打印）
+3. 用 `ffmpeg -f mpeg -i 抓包文件` 手工确认码流封装，再决定 `-f` 的实际取值
+
+### 13.7 服务启动失败
 
 | 日志 | 原因 |
 |------|------|
@@ -717,7 +740,7 @@ server {
 | `isup.public-ip 不能是 0.0.0.0` | 公网地址填了监听地址 |
 | `ffmpeg 不可用` | `FFMPEG_PATH` 不对，媒体功能不可用（接口仍可调用） |
 
-### 13.7 日志位置
+### 13.8 日志位置
 
 - 应用日志：控制台 / `stdout.log`
 - 海康 SDK 日志：`./logs/EHomeSDKLog/`（`NET_ECMS_SetLogToFile` 与 `NET_ESTREAM_SetLogToFile` 输出）
@@ -738,6 +761,14 @@ mvn clean package -DskipTests
 ```
 
 单元测试覆盖：参数校验、会话管理（状态机 / 防重复停止 / 会话 ID 关联）、时间范围校验、API Key 鉴权、文件路径与穿越防护、FFmpeg 命令构建、回放入参构造、设备注册表。
+
+### FFmpeg 转封装链路集成测试（可选）
+
+验证「PS 码流 → stdin → ffmpeg → HLS / MP4」真的能出产物，需要本机已安装 ffmpeg，默认跳过：
+
+```bash
+mvn test -Disup.ffmpeg.it=true -Disup.ffmpeg.it.path=C:/Users/15515/ffmpeg/bin/ffmpeg.exe
+```
 
 > 真实 ISUP SDK 需要 native library 和真实设备，CI 中不连接设备。
 
