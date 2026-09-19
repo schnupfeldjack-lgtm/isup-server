@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ISUP 调试台</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+<style>
+  :root {
+    --bg: #12151c;
+    --panel: #1a1f2b;
+    --panel-2: #222836;
+    --border: #2c3446;
+    --text: #dfe4ee;
+    --muted: #8b95a9;
+    --accent: #4f9cf9;
+    --ok: #3ecf8e;
+    --warn: #f0b429;
+    --err: #f26d6d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); font-weight: 600; }
+  .hint { color: var(--muted); font-size: 12px; }
+  .warn-bar {
+    background: rgba(240,180,41,.12); border: 1px solid rgba(240,180,41,.35);
+    color: var(--warn); padding: 8px 12px; border-radius: 6px; margin-bottom: 16px; font-size: 12px;
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px; margin-bottom: 16px;
+  }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  input, select {
+    width: 100%; padding: 7px 9px; background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 5px; color: var(--text);
+    font-size: 13px; font-family: inherit;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  button {
+    padding: 7px 14px; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 5px;
+    cursor: pointer; font-size: 13px; font-family: inherit;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #0b1220; font-weight: 600; }
+  button.primary:hover:not(:disabled) { filter: brightness(1.12); color: #0b1220; }
+  button.danger:hover:not(:disabled) { border-color: var(--err); color: var(--err); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+  .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+  video {
+    width: 100%; aspect-ratio: 16/9; background: #000;
+    border-radius: 6px; display: block;
+  }
+  .status { font-size: 12px; padding: 2px 8px; border-radius: 10px; border: 1px solid; }
+  .s-STARTING { color: var(--warn); border-color: rgba(240,180,41,.5); }
+  .s-RUNNING  { color: var(--ok);   border-color: rgba(62,207,142,.5); }
+  .s-COMPLETED{ color: var(--ok);   border-color: rgba(62,207,142,.5); }
+  .s-FAILED   { color: var(--err);  border-color: rgba(242,109,109,.5); }
+  .s-STOPPED  { color: var(--muted);border-color: var(--border); }
+  .s-UP       { color: var(--ok);   border-color: rgba(62,207,142,.5); }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; }
+  td.mono, .mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .dev-item { cursor: pointer; }
+  .dev-item:hover { background: var(--panel-2); }
+  #log {
+    height: 220px; overflow-y: auto; background: #0d1017;
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px; font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 12px; white-space: pre-wrap; word-break: break-all;
+  }
+  .log-ok { color: var(--ok); } .log-err { color: var(--err); }
+  .log-req { color: var(--accent); } .log-time { color: var(--muted); }
+  .empty { color: var(--muted); font-size: 12px; padding: 8px 0; }
+</style>
+</head>
+<body>
+
+<h1>ISUP 调试台</h1>
+<div class="hint">海康 ISUP 5.0 接入服务 · 联调用，验证设备注册、预览、回放、下载是否打通</div>
+
+<div class="warn-bar">
+  本页仅供内网联调。页面会调用 <b>/api/v1/**</b>（需 X-API-Key），API Key 明文保存在浏览器 localStorage；
+  <b>/media/**</b> 不鉴权。请勿把 8080 暴露到公网。
+</div>
+
+<!-- 连接配置 -->
+<div class="card">
+  <h2>连接</h2>
+  <div class="grid">
+    <div>
+      <label>服务地址</label>
+      <input id="base" placeholder="http://127.0.0.1:8080">
+    </div>
+    <div>
+      <label>API Key（X-API-Key）</label>
+      <input id="apikey" type="password" placeholder="isup.api-key">
+    </div>
+  </div>
+  <div class="row">
+    <button class="primary" onclick="checkHealth()">健康检查</button>
+    <button onclick="loadDevices()">刷新设备</button>
+    <span id="health" class="hint"></span>
+  </div>
+</div>
+
+<div class="layout">
+  <!-- 左：设备 + 播放 -->
+  <div>
+    <div class="card">
+      <h2>在线设备（点击填入 deviceId）</h2>
+      <div id="devices"><div class="empty">未加载</div></div>
+    </div>
+
+    <div class="card">
+      <h2>实时预览</h2>
+      <div class="grid">
+        <div><label>deviceId</label><input id="pv-device" placeholder="GW4206623"></div>
+        <div><label>channel</label><input id="pv-channel" type="number" value="1" min="1"></div>
+        <div>
+          <label>码流</label>
+          <select id="pv-stream">
+            <option value="0">0 主码流</option>
+            <option value="1">1 子码流</option>
+            <option value="2">2 第三码流</option>
+          </select>
+        </div>
+        <div>
+          <label>链路</label>
+          <select id="pv-link">
+            <option value="">跟随全局配置</option>
+            <option value="0">0 TCP</option>
+            <option value="1">1 UDP</option>
+            <option value="2">2 HRUDP</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <button class="primary" onclick="startPreview()">开始预览</button>
+        <button class="danger" onclick="stopPlayer()">停止</button>
+        <span id="pv-status"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>按时间段回放</h2>
+      <div class="grid">
+        <div><label>deviceId</label><input id="pb-device" placeholder="GW4206623"></div>
+        <div><label>channel</label><input id="pb-channel" type="number" value="1" min="1"></div>
+        <div><label>开始（设备本地时间）</label><input id="pb-start" placeholder="2026-09-19 14:00:00"></div>
+        <div><label>结束</label><input id="pb-end" placeholder="2026-09-19 14:10:00"></div>
+      </div>
+      <div class="row">
+        <button onclick="fillRange(10)">最近 10 分钟</button>
+        <button onclick="fillRange(60)">最近 1 小时</button>
+        <button onclick="fillRange(24*60)">最近 24 小时</button>
+      </div>
+      <div class="row">
+        <button class="primary" onclick="startPlayback()">开始回放</button>
+        <button class="danger" onclick="stopPlayer()">停止</button>
+        <span id="pb-status"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 右：播放器 + 下载 -->
+  <div>
+    <div class="card">
+      <h2>播放器（HLS）</h2>
+      <video id="video" controls muted autoplay playsinline></video>
+      <div class="row">
+        <span id="play-meta" class="hint mono"></span>
+        <button onclick="reloadPlayer()">重载流</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>录像下载（异步 → MP4）</h2>
+      <div class="grid">
+        <div><label>deviceId</label><input id="dl-device" placeholder="GW4206623"></div>
+        <div><label>channel</label><input id="dl-channel" type="number" value="1" min="1"></div>
+        <div><label>开始</label><input id="dl-start" placeholder="2026-09-19 14:00:00"></div>
+        <div><label>结束</label><input id="dl-end" placeholder="2026-09-19 14:10:00"></div>
+      </div>
+      <div class="row">
+        <button class="primary" onclick="startDownload()">创建下载任务</button>
+        <span id="dl-status"></span>
+        <button id="dl-save" disabled onclick="saveFile()">保存 MP4</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>本页会话</h2>
+      <div id="sessions"><div class="empty">无</div></div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>请求日志</h2>
+  <div id="log"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+/* ---------- 连接配置 ---------- */
+const baseEl = $('base'), keyEl = $('apikey');
+
+(function init() {
+  const saved = localStorage.getItem('isup-debug') || '{}';
+  const cfg = JSON.parse(saved);
+  baseEl.value = cfg.base || location.origin;
+  keyEl.value = cfg.key || '';
+})();
+function saveCfg() {
+  localStorage.setItem('isup-debug', JSON.stringify({ base: baseEl.value.trim(), key: keyEl.value.trim() }));
+}
+baseEl.addEventListener('change', saveCfg);
+keyEl.addEventListener('change', saveCfg);
+
+function baseUrl() { return baseEl.value.trim().replace(/\/+$/, ''); }
+/** playUrl 是 /media/... 相对路径，拼到服务地址上 */
+function resolve(p) { return /^https?:/i.test(p) ? p : baseUrl() + p; }
+
+/* ---------- 日志 ---------- */
+function log(msg, cls) {
+  const t = new Date().toTimeString().slice(0, 8);
+  const line = document.createElement('div');
+  line.innerHTML = `<span class="log-time">${t}</span> ` +
+                   (cls ? `<span class="${cls}">${esc(msg)}</span>` : esc(msg));
+  const box = $('log');
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
+}
+function esc(s) {
+  return String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+}
+
+/* ---------- HTTP ---------- */
+async function api(path, options) {
+  const opt = options || {};
+  const headers = { 'Content-Type': 'application/json' };
+  const key = keyEl.value.trim();
+  if (key) headers['X-API-Key'] = key;
+  Object.assign(headers, opt.headers || {});
+  log(`→ ${opt.method || 'GET'} ${path}`, 'log-req');
+  let res;
+  try {
+    res = await fetch(baseUrl() + path, { method: opt.method || 'GET', headers, body: opt.body });
+  } catch (e) {
+    log(`✗ 网络错误：${e.message}（服务地址不通或被浏览器拦截）`, 'log-err');
+    throw e;
+  }
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch (_) { data = text; }
+  if (!res.ok) {
+    const msg = data && data.message ? data.message : text;
+    log(`✗ ${res.status} ${esc(msg)}`, 'log-err');
+    throw new Error(`${res.status} ${msg}`);
+  }
+  log(`✓ ${res.status} ${JSON.stringify(data).slice(0, 400)}`, 'log-ok');
+  return data;
+}
+
+/* ---------- 健康检查 / 设备 ---------- */
+async function checkHealth() {
+  try {
+    const h = await api('/api/health');
+    $('health').innerHTML =
+      `<span class="status s-${h.status}">${h.status}</span> ` +
+      `SDK:${h.sdkReady ? '就绪' : '未就绪'} · 在线设备:${h.onlineDevices} · 会话:${h.activeSessions} · ` +
+      `publicIp:${esc(h.publicIp)} · ${h.cmsPort}/${h.previewPort}/${h.playbackPort} · 已运行 ${h.uptimeSeconds}s`;
+  } catch (e) { $('health').textContent = '健康检查失败'; }
+}
+
+async function loadDevices() {
+  let list;
+  try { list = await api('/api/v1/devices'); } catch (e) {
+    $('devices').innerHTML = '<div class="empty">加载失败，看日志</div>'; return;
+  }
+  if (!list || !list.length) {
+    $('devices').innerHTML = '<div class="empty">没有在线设备 —— 检查 7660 端口、ehome-key、录像机 ISUP 5.0 配置</div>';
+    return;
+  }
+  let html = '<table><tr><th>deviceId</th><th>IP</th><th>状态</th><th>上线时间</th></tr>';
+  for (const d of list) {
+    html += `<tr class="dev-item" onclick="pick('${esc(d.deviceId)}')">` +
+      `<td class="mono">${esc(d.deviceId)}</td><td class="mono">${esc(d.deviceIp || '-')}</td>` +
+      `<td>${d.online ? '<span class="status s-RUNNING">在线</span>' : '<span class="status s-STOPPED">离线</span>'}</td>` +
+      `<td>${esc(d.onlineTime || '-')}</td></tr>`;
+  }
+  $('devices').innerHTML = html + '</table>';
+}
+function pick(deviceId) {
+  ['pv-device', 'pb-device', 'dl-device'].forEach(id => { $(id).value = deviceId; });
+  log(`已填入 deviceId=${deviceId}`);
+}
+
+/* ---------- 播放器 ---------- */
+let hls = null, currentSession = null, waitTimer = null;
+
+function stopPlayer() {
+  clearTimeout(waitTimer);
+  if (hls) { hls.destroy(); hls = null; }
+  const v = $('video');
+  v.pause(); v.removeAttribute('src'); v.load();
+  $('play-meta').textContent = '';
+  $('pv-status').innerHTML = '';
+  $('pb-status').innerHTML = '';
+  if (currentSession) stopSession(currentSession.sessionId);
+  currentSession = null;
+}
+
+function reloadPlayer() {
+  if (currentSession) attach(currentSession.playUrl, currentSession.sessionId);
+}
+
+/**
+ * HLS 切片要等设备推流后才会生成，直接拉 index.m3u8 会 404。
+ * 先轮询会话状态到 RUNNING，再挂流。
+ */
+function playWhenReady(sessionId, playUrl, statusEl) {
+  clearTimeout(waitTimer);
+  let tries = 0;
+  const tick = async () => {
+    tries++;
+    try {
+      const s = await api('/api/v1/sessions/' + sessionId);
+      statusEl.innerHTML = `<span class="status s-${s.status}">${s.status}</span>`;
+      if (s.status === 'RUNNING') { attach(playUrl, sessionId); return; }
+      if (s.status === 'FAILED' || s.status === 'STOPPED') {
+        statusEl.innerHTML = `<span class="status s-${s.status}">${s.status}</span> 请查服务端日志`;
+        return;
+      }
+    } catch (e) { /* 网络问题继续重试 */ }
+    if (tries < 30) waitTimer = setTimeout(tick, 1000);
+    else statusEl.innerHTML = '<span class="status s-FAILED">等不到 RUNNING</span> 设备没推流，查 8003/8004 端口';
+  };
+  tick();
+}
+
+function attach(playUrl, sessionId) {
+  const url = resolve(playUrl);
+  const v = $('video');
+  if (hls) { hls.destroy(); hls = null; }
+  $('play-meta').textContent = url;
+  log(`加载 HLS：${url}`);
+  if (v.canPlayType('application/vnd.apple.mpegurl')) {
+    v.src = url;
+  } else if (window.Hls) {
+    if (!window.Hls.isSupported()) { log('浏览器不支持 HLS 且 hls.js 不可用', 'log-err'); return; }
+    hls = new window.Hls({ manifestLoadPolicy: { default: { maxTimeToFirstByteMs: 30000, maxLoadTimeMs: 60000, timeoutRetry: { maxNumRetry: 6, retryDelayMs: 1000, maxRetryDelayMs: 8000 }, errorRetry: { maxNumRetry: 8, retryDelayMs: 1500, maxRetryDelayMs: 8000 } } } });
+    hls.loadSource(url);
+    hls.attachMedia(v);
+    hls.on(window.Hls.Events.MANIFEST_PARSED, () => v.play().catch(() => {}));
+    hls.on(window.Hls.Events.ERROR, (e, data) => {
+      if (data && data.fatal) log(`HLS 致命错误：${data.type} / ${data.details}`, 'log-err');
+    });
+  } else {
+    log('hls.js 未加载（CDN 不可达？），Chrome/Edge 下无法播放 m3u8', 'log-err');
+  }
+  v.play().catch(() => {});
+}
+
+/* ---------- 预览 / 回放 ---------- */
+async function startPreview() {
+  const body = {
+    deviceId: $('pv-device').value.trim(),
+    channel: Number($('pv-channel').value),
+    streamType: Number($('pv-stream').value)
+  };
+  if (!body.deviceId) { log('deviceId 不能为空', 'log-err'); return; }
+  const lm = $('pv-link').value;
+  if (lm !== '') body.linkMode = Number(lm);
+  try {
+    const r = await api('/api/v1/preview', { method: 'POST', body: JSON.stringify(body) });
+    currentSession = { sessionId: r.sessionId, playUrl: r.playUrl };
+    addSession(r.sessionId, 'PREVIEW', `${body.deviceId} ch${body.channel}`);
+    playWhenReady(r.sessionId, r.playUrl, $('pv-status'));
+  } catch (e) { $('pv-status').innerHTML = '<span class="status s-FAILED">失败</span>'; }
+}
+
+async function startPlayback() {
+  const body = {
+    deviceId: $('pb-device').value.trim(),
+    channel: Number($('pb-channel').value),
+    startTime: $('pb-start').value.trim(),
+    endTime: $('pb-end').value.trim()
+  };
+  if (!body.deviceId || !body.startTime || !body.endTime) { log('deviceId / 开始 / 结束 都要填', 'log-err'); return; }
+  try {
+    const r = await api('/api/v1/playback', { method: 'POST', body: JSON.stringify(body) });
+    currentSession = { sessionId: r.sessionId, playUrl: r.playUrl };
+    addSession(r.sessionId, 'PLAYBACK', `${body.deviceId} ch${body.channel}`);
+    playWhenReady(r.sessionId, r.playUrl, $('pb-status'));
+  } catch (e) { $('pb-status').innerHTML = '<span class="status s-FAILED">失败</span>'; }
+}
+
+function fillRange(minutes) {
+  const fmt = d => d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' +
+                   p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds());
+  const end = new Date(), start = new Date(end.getTime() - minutes * 60000);
+  ['pb', 'dl'].forEach(p => { $(p + '-start').value = fmt(start); $(p + '-end').value = fmt(end); });
+  log(`已填充最近 ${minutes} 分钟（按本机时间，注意录像机时间是否一致）`);
+}
+function p2(n) { return String(n).padStart(2, '0'); }
+
+/* ---------- 下载 ---------- */
+let downloadTask = null, dlTimer = null;
+
+async function startDownload() {
+  const body = {
+    deviceId: $('dl-device').value.trim(),
+    channel: Number($('dl-channel').value),
+    startTime: $('dl-start').value.trim(),
+    endTime: $('dl-end').value.trim()
+  };
+  if (!body.deviceId || !body.startTime || !body.endTime) { log('deviceId / 开始 / 结束 都要填', 'log-err'); return; }
+  $('dl-save').disabled = true;
+  try {
+    const r = await api('/api/v1/download', { method: 'POST', body: JSON.stringify(body) });
+    downloadTask = r.taskId;
+    addSession(r.taskId, 'DOWNLOAD', `${body.deviceId} ch${body.channel}`);
+    pollDownload(r.taskId);
+  } catch (e) { $('dl-status').innerHTML = '<span class="status s-FAILED">失败</span>'; }
+}
+
+function pollDownload(taskId) {
+  clearInterval(dlTimer);
+  let n = 0;
+  dlTimer = setInterval(async () => {
+    n++;
+    try {
+      const s = await api('/api/v1/sessions/' + taskId);
+      $('dl-status').innerHTML = `<span class="status s-${s.status}">${s.status}</span>`;
+      if (s.status === 'COMPLETED') {
+        clearInterval(dlTimer);
+        const mb = s.fileSize ? (s.fileSize / 1048576).toFixed(2) + ' MB' : '';
+        $('dl-status').innerHTML += ` ${mb} <button onclick="saveFile()">保存 MP4</button>`;
+        $('dl-save').disabled = false;
+        return;
+      }
+      if (s.status === 'FAILED' || s.status === 'STOPPED') { clearInterval(dlTimer); return; }
+    } catch (e) { clearInterval(dlTimer); }
+    if (n > 400) { clearInterval(dlTimer); log('下载轮询超时', 'log-err'); }
+  }, 1500);
+}
+
+/** /api/v1/download/{id}/file 需要 X-API-Key，不能用 <a href> 直接下，走 fetch + blob */
+async function saveFile() {
+  if (!downloadTask) return;
+  const key = keyEl.value.trim();
+  log(`→ GET /api/v1/download/${downloadTask}/file`, 'log-req');
+  try {
+    const res = await fetch(`${baseUrl()}/api/v1/download/${downloadTask}/file`,
+      { headers: key ? { 'X-API-Key': key } : {} });
+    if (!res.ok) { log(`✗ ${res.status} 下载文件失败`, 'log-err'); return; }
+    const blob = await res.blob();
+    const cd = res.headers.get('Content-Disposition') || '';
+    const m = /filename="([^"]+)"/.exec(cd);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = m ? m[1] : `${downloadTask}.mp4`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    log(`✓ 已保存 ${a.download}（${(blob.size / 1048576).toFixed(2)} MB）`, 'log-ok');
+  } catch (e) { log(`✗ ${e.message}`, 'log-err'); }
+}
+
+/* ---------- 会话列表 ---------- */
+const sessionList = [];
+function addSession(id, type, desc) {
+  if (sessionList.some(s => s.id === id)) return;
+  sessionList.unshift({ id, type, desc });
+  renderSessions();
+}
+function renderSessions() {
+  if (!sessionList.length) { $('sessions').innerHTML = '<div class="empty">无</div>'; return; }
+  let html = '<table><tr><th>sessionId</th><th>类型</th><th>说明</th><th></th></tr>';
+  for (const s of sessionList) {
+    html += `<tr><td class="mono">${esc(s.id.slice(0, 8))}…</td><td>${s.type}</td><td>${esc(s.desc)}</td>` +
+      `<td><button class="danger" onclick="stopSession('${s.id}')">停止</button></td></tr>`;
+  }
+  $('sessions').innerHTML = html + '</table>';
+}
+async function stopSession(id) {
+  try { await api('/api/v1/sessions/' + id, { method: 'DELETE' }); } catch (e) {}
+}
+
+checkHealth();
+loadDevices();
+</script>
+</body>
+</html>
