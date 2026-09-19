@@ -485,16 +485,42 @@ curl -s -X DELETE -H "X-API-Key: $KEY" $SERVER/api/v1/sessions/$TASK | jq
 
 ---
 
-## 11. Linux 部署方式
+## 11. 本地快速启动
 
-### 11.1 构建
+配置统一放在 **`config/application.yml`**（Spring Boot 会自动加载，优先级高于 jar 内配置），
+改配置不需要重新打包。该文件含密钥，已加入 `.gitignore`，模板见 `config/application.example.yml`。
+
+```bash
+# 1. 复制模板（如还没有）
+cp config/application.example.yml config/application.yml
+
+# 2. 改这三个值
+#    isup.public-ip   公网 IP（部署到阿里云时填 ECS 的公网 IP）
+#    isup.ehome-key   与录像机「平台接入」里一致的密钥
+#    isup.api-key     ERP 调用用的 X-API-Key
+
+# 3. 构建
+mvn clean package -DskipTests
+
+# 4. 启动
+./start.sh          # Linux / macOS
+start.bat           # Windows
+```
+
+启动成功的标志：日志出现 `海康 ISUP SDK 加载完成` + `CMS 注册监听成功` + `预览监听成功` + `回放/下载监听成功`。
+
+如果只看到 `ISUP 服务启动失败` 的提示块，按里面的 4 条清单逐项核对即可（最常见是 SDK 未放齐、public-ip 填错）。
+
+## 12. Linux 部署方式
+
+### 12.1 构建
 
 ```bash
 mvn clean package -DskipTests
 # 产物：target/isup-server-1.0.0.jar
 ```
 
-### 11.2 目录规划
+### 12.2 目录规划
 
 ```bash
 sudo mkdir -p /opt/isup-server
@@ -521,7 +547,7 @@ mkdir -p /opt/isup-server/data/media /opt/isup-server/logs
 └── logs/EHomeSDKLog/    # 海康 SDK 日志
 ```
 
-### 11.3 启动前配置（环境变量）
+### 12.3 启动前配置（环境变量）
 
 ```bash
 export ISUP_PUBLIC_IP=47.xxx.xxx.xxx      # 阿里云公网 IP（必填）
@@ -532,14 +558,14 @@ export FFMPEG_PATH=/usr/bin/ffmpeg        # ffmpeg 路径
 export ISUP_MEDIA_DIR=/opt/isup-server/data/media
 ```
 
-### 11.4 直接启动（不使用 Docker）
+### 12.4 直接启动（不使用 Docker）
 
 ```bash
 cd /opt/isup-server
 java -jar isup-server-1.0.0.jar
 ```
 
-### 11.5 systemd 托管（推荐）
+### 12.5 systemd 托管（推荐）
 
 创建 `/etc/systemd/system/isup-server.service`：
 
@@ -576,7 +602,7 @@ sudo systemctl status isup-server
 sudo journalctl -u isup-server -f
 ```
 
-### 11.6 可选：Nginx 反代 8080（给 ERP / 浏览器用）
+### 12.6 可选：Nginx 反代 8080（给 ERP / 浏览器用）
 
 ```nginx
 server {
@@ -596,9 +622,9 @@ server {
 
 ---
 
-## 12. 常见错误排查
+## 13. 常见错误排查
 
-### 12.1 设备一直不在线
+### 13.1 设备一直不在线
 
 | 现象 | 排查 |
 |------|------|
@@ -608,33 +634,33 @@ server {
 | `NET_ECMS_StartListen 失败` | 7660 被占用：`ss -lntp \| grep 7660` |
 | 设备显示"注册失败/超时" | `public-ip` 填成了 0.0.0.0 / 127.0.0.1，或 NAT 环境未填映射后的公网 IP |
 
-### 12.2 预览返回 `设备回连超时`
+### 13.2 预览返回 `设备回连超时`
 
 - 8003 端口未放行 → 设备连不上来推流
 - `public-ip` 不是设备可访问的地址
 - ffmpeg 未安装或 `ffmpeg-path` 配置错误（日志会有 `启动 ffmpeg 失败`）
 - 通道号填错（NVR 下 IPC 常是 33/49 等，不是 1）
 
-### 12.3 预览有 sessionId，但播放 404 / 黑屏
+### 13.3 预览有 sessionId，但播放 404 / 黑屏
 
 - 等 2~5 秒再拉 `index.m3u8`（HLS 需要先产生切片）
 - 用 `GET /api/v1/sessions/{sessionId}` 确认状态是 `RUNNING`（`STARTING` 说明设备还没推流）
 - 浏览器访问 8080 端口是否可达
 - 查看 `data/media/preview/{sessionId}/` 下是否生成了 `index.m3u8` 与 `seg_*.ts`
 
-### 12.4 回放/下载一直 STARTING
+### 13.4 回放/下载一直 STARTING
 
 - 8004 端口未放行
 - 该时间段确实没有录像（换一个已知有录像的时间段）
 - 通道号错误
 
-### 12.5 下载任务 FAILED
+### 13.5 下载任务 FAILED
 
 - 看日志里 `NET_ECMS_StartPlayBack failed: ... errorCode=xx`
 - MP4 封装不支持设备音频编码时，把 `isup.ffmpeg.codec-args` 改成 `-c:v copy -c:a aac`
 - 时间跨度过大被拒绝（单次上限 24 小时）
 
-### 12.6 服务启动失败
+### 13.6 服务启动失败
 
 | 日志 | 原因 |
 |------|------|
@@ -644,14 +670,14 @@ server {
 | `isup.public-ip 不能是 0.0.0.0` | 公网地址填了监听地址 |
 | `ffmpeg 不可用` | `FFMPEG_PATH` 不对，媒体功能不可用（接口仍可调用） |
 
-### 12.7 日志位置
+### 13.7 日志位置
 
 - 应用日志：控制台 / `stdout.log`
 - 海康 SDK 日志：`./logs/EHomeSDKLog/`（`NET_ECMS_SetLogToFile` 与 `NET_ESTREAM_SetLogToFile` 输出）
 
 ---
 
-## 13. 构建与测试
+## 14. 构建与测试
 
 ```bash
 # 编译（Java 21）
@@ -670,7 +696,7 @@ mvn clean package -DskipTests
 
 ---
 
-## 14. 并发与资源释放说明
+## 15. 并发与资源释放说明
 
 1. 同一设备允许多个不同通道同时预览，会话用 `ConcurrentHashMap` 管理
 2. JNA 回调对象由会话与 newlink 监听器**双重强引用**持有，不会被 GC

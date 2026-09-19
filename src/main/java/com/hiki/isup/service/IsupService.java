@@ -69,6 +69,22 @@ public class IsupService implements CommandLineRunner, DisposableBean {
         }
         try {
             start();
+        } catch (IllegalStateException e) {
+            // 配置或 SDK 环境问题：只打印原因和排查清单，不打长堆栈
+            log.error("\n================ ISUP 服务启动失败 ================\n"
+                            + "原因：{}\n"
+                            + "--------------------------------------------------\n"
+                            + "请依次检查：\n"
+                            + "  1. isup.public-ip 是否为录像机可访问的公网地址（不能是 0.0.0.0 / 127.0.0.1）\n"
+                            + "  2. isup.ehome-key 是否与录像机「平台接入」里配置的密钥一致\n"
+                            + "  3. isup.sdk-dir 目录下是否放齐 SDK 文件\n"
+                            + "     Linux: libHCISUPCMS.so libHCISUPStream.so libcrypto.so libssl.so HCAapSDKCom/\n"
+                            + "     Windows: HCISUPCMS.dll HCISUPStream.dll libeay32.dll ssleay32.dll HCAapSDKCom\\\n"
+                            + "  4. 7660 / 8003 / 8004 端口是否被占用或未放行\n"
+                            + "配置文件：jar 同级的 config/application.yml（修改后重启生效）\n"
+                            + "==================================================\n"
+                            + "HTTP 接口仍可访问（GET /api/health），但设备无法注册。",
+                    e.getMessage());
         } catch (Exception e) {
             // 启动失败不应导致整个 Spring 容器崩溃，保留 HTTP 接口便于排查
             log.error("ISUP 服务启动失败，HTTP API 仍可访问但设备无法注册", e);
@@ -109,14 +125,18 @@ public class IsupService implements CommandLineRunner, DisposableBean {
     private void validateConfig() {
         String publicIp = properties.getPublicIp();
         if (publicIp == null || publicIp.isBlank()) {
-            throw new IllegalStateException("必须配置 isup.public-ip（环境变量 ISUP_PUBLIC_IP），该地址会返回给设备用于回连");
+            throw new IllegalStateException("未配置 isup.public-ip。"
+                    + "请在 config/application.yml 中设置 isup.public-ip，或用 --isup.public-ip=你的公网IP / 环境变量 ISUP_PUBLIC_IP 指定。"
+                    + "该地址是返回给录像机用于回连的公网地址");
         }
         String ip = publicIp.trim();
         if ("0.0.0.0".equals(ip) || "127.0.0.1".equals(ip) || "localhost".equalsIgnoreCase(ip) || "::".equals(ip)) {
-            throw new IllegalStateException("isup.public-ip 不能是 " + ip + "，必须是设备可访问的公网地址");
+            throw new IllegalStateException("isup.public-ip 不能是 " + ip + "。"
+                    + "listen-ip 才填 0.0.0.0（本地监听），public-ip 必须填设备能访问到的公网地址");
         }
         if (properties.getEhomeKey() == null || properties.getEhomeKey().isBlank()) {
-            throw new IllegalStateException("必须配置 isup.ehome-key（环境变量 ISUP_EHOME_KEY），且与录像机上的密钥一致");
+            throw new IllegalStateException("未配置 isup.ehome-key。"
+                    + "请在 config/application.yml 中设置 isup.ehome-key，值必须与录像机「平台接入」里的密钥完全一致");
         }
     }
 

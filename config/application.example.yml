@@ -1,0 +1,43 @@
+# 配置模板：复制为 application.yml 后修改
+# cp config/application.example.yml config/application.yml
+#
+# 必改三项：
+#   isup.public-ip     公网 IP（不能用 0.0.0.0 / 127.0.0.1）
+#   isup.ehome-key     与录像机上配置的 ISUP 密钥一致
+#   isup.api-key       ERP 调用用的 X-API-Key，建议随机生成
+
+server:
+  port: 8080
+
+isup:
+  enabled: true
+  sdk-dir: ./sdk
+  public-ip: 请填写公网IP
+  ehome-key: 请填写与录像机一致的密钥
+  api-key: 请填写ERP调用密钥
+  ffmpeg-path: ffmpeg
+  media-dir: ./data/media
+  link-mode: 0
+
+  cms:
+    listen-ip: 0.0.0.0
+    listen-port: 7660
+
+  stream:
+    listen-ip: 0.0.0.0
+    preview-port: 8003
+    playback-port: 8004
+
+  ffmpeg:
+    ps-input-format: mpeg
+    codec-args: -c copy
+    hls-time: 2
+    hls-list-size: 6
+    hls-flags: delete_segments+append_list
+    mp4-args: -f mp4 -movflags +frag_keyframe+empty_moov
+    log-level: error
+
+  session:
+    start-timeout-sec: 30
+    idle-timeout-sec: 120
+    download-max-sec: 3600
