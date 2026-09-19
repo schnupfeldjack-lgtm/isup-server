@@ -157,6 +157,17 @@ class IsupApiWebTest {
     }
 
     @Test
+    @DisplayName("会话列表接口需要鉴权，有权限时返回数组（含 ERP 等外部发起的会话）")
+    void sessionsList() throws Exception {
+        mockMvc.perform(get("/api/v1/sessions"))
+                .andExpect(status().isUnauthorized());
+
+        mockMvc.perform(get("/api/v1/sessions").header(ApiKeyInterceptor.API_KEY_HEADER, API_KEY))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$").isArray());
+    }
+
+    @Test
     @DisplayName("请求体不是合法 JSON 时返回 400")
     void badJson() throws Exception {
         mockMvc.perform(post("/api/v1/preview")

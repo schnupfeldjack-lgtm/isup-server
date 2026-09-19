@@ -138,7 +138,24 @@ public class IsupController {
         if (!MediaPaths.isSafeId(sessionId)) {
             throw new BadRequestException("sessionId 格式非法：" + sessionId);
         }
-        MediaSession session = sessionManager.require(sessionId);
+        return toResponse(sessionManager.require(sessionId));
+    }
+
+    /**
+     * 查询全部会话（按创建时间倒序）。
+     *
+     * <p>ERP 等外部调用方发起的会话也能查到，便于统一观测与停止；
+     * 终态会话会在内存中保留一段时间后再清理。</p>
+     */
+    @GetMapping("/api/v1/sessions")
+    public List<SessionStatusResponse> sessions() {
+        return sessionManager.list().stream()
+                .map(this::toResponse)
+                .toList();
+    }
+
+    /** 会话 → 响应体，下载类会话补上实际文件大小 */
+    private SessionStatusResponse toResponse(MediaSession session) {
         SessionStatusResponse response = SessionStatusResponse.from(session);
         if (session.getFilePath() != null) {
             File file = new File(session.getFilePath());

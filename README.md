@@ -475,6 +475,25 @@ Content-Type: application/json
 停止时会依次释放：`NET_ESTREAM_StopPreview` / `NET_ECMS_StopGetRealStream`（预览）
 或 `NET_ESTREAM_StopPlayBack` / `NET_ECMS_StopPlayBack`（回放下载），然后销毁 ffmpeg 进程并清理临时文件。
 
+### 9.8 查询全部会话
+
+`GET /api/v1/sessions`
+
+返回按创建时间倒序的数组，每项字段同 9.6。**ERP 等外部调用方发起的会话也能查到**，便于统一观测与停止。
+终态会话（`COMPLETED` / `FAILED` / `STOPPED`）会在内存中保留一段时间后再清理。
+
+```json
+[
+  {
+    "sessionId": "0f7c8b1e-...",
+    "type": "PREVIEW",
+    "status": "RUNNING",
+    "deviceId": "GW4206623",
+    "channel": 1
+  }
+]
+```
+
 ### 错误响应格式
 
 ```json

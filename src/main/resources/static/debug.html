@@ -201,7 +201,7 @@
     </div>
 
     <div class="card">
-      <h2>本页会话</h2>
+      <h2>服务端会话（含 ERP 发起的，进行中每 3 秒自动刷新）</h2>
       <div id="sessions"><div class="empty">无</div></div>
     </div>
   </div>
@@ -280,12 +280,13 @@ async function api(path, options) {
   const key = keyEl.value.trim();
   if (key) headers['X-API-Key'] = key;
   Object.assign(headers, opt.headers || {});
-  log(`→ ${opt.method || 'GET'} ${path}`, 'log-req');
+  const quiet = !!opt.quiet;   // 轮询用：不刷日志
+  if (!quiet) log(`→ ${opt.method || 'GET'} ${path}`, 'log-req');
   let res;
   try {
     res = await fetch(baseUrl() + path, { method: opt.method || 'GET', headers, body: opt.body });
   } catch (e) {
-    log(`✗ 网络错误：${e.message}（服务地址不通或被浏览器拦截）`, 'log-err');
+    if (!quiet) log(`✗ 网络错误：${e.message}（服务地址不通或被浏览器拦截）`, 'log-err');
     throw e;
   }
   const text = await res.text();
@@ -293,11 +294,13 @@ async function api(path, options) {
   try { data = text ? JSON.parse(text) : null; } catch (_) { data = text; }
   if (!res.ok) {
     const msg = data && data.message ? data.message : text;
-    log(`✗ ${res.status} ${esc(msg)}`, 'log-err');
-    if (res.status === 401) flagKeyError();
+    if (!quiet) {
+      log(`✗ ${res.status} ${esc(msg)}`, 'log-err');
+      if (res.status === 401) flagKeyError();
+    }
     throw new Error(`${res.status} ${msg}`);
   }
-  log(`✓ ${res.status} ${JSON.stringify(data).slice(0, 400)}`, 'log-ok');
+  if (!quiet) log(`✓ ${res.status} ${JSON.stringify(data).slice(0, 400)}`, 'log-ok');
   return data;
 }
 
@@ -514,28 +517,61 @@ async function saveFile() {
   } catch (e) { log(`✗ ${e.message}`, 'log-err'); }
 }
 
-/* ---------- 会话列表 ---------- */
-const sessionList = [];
-function addSession(id, type, desc) {
-  if (sessionList.some(s => s.id === id)) return;
-  sessionList.unshift({ id, type, desc });
-  renderSessions();
+/* ---------- 会话列表（服务端全量，含 ERP 等外部发起的） ---------- */
+let sessionTimer = null;
+
+async function loadSessions() {
+  let list;
+  try {
+    list = await api('/api/v1/sessions', { quiet: true });
+  } catch (e) {
+    stopSessionPolling();
+    return;
+  }
+  list = list || [];
+  renderSessions(list);
+  // 只有存在进行中的会话才轮询，避免空转刷请求
+  if (list.some(s => s.status === 'STARTING' || s.status === 'RUNNING')) startSessionPolling();
+  else stopSessionPolling();
 }
-function renderSessions() {
-  if (!sessionList.length) { $('sessions').innerHTML = '<div class="empty">无</div>'; return; }
-  let html = '<table><tr><th>sessionId</th><th>类型</th><th>说明</th><th></th></tr>';
-  for (const s of sessionList) {
-    html += `<tr><td class="mono">${esc(s.id.slice(0, 8))}…</td><td>${s.type}</td><td>${esc(s.desc)}</td>` +
-      `<td><button class="danger" onclick="stopSession('${s.id}')">停止</button></td></tr>`;
+
+function startSessionPolling() {
+  if (sessionTimer) return;
+  sessionTimer = setInterval(loadSessions, 3000);
+}
+function stopSessionPolling() {
+  if (sessionTimer) { clearInterval(sessionTimer); sessionTimer = null; }
+}
+
+function renderSessions(list) {
+  if (!list.length) { $('sessions').innerHTML = '<div class="empty">当前没有会话</div>'; return; }
+  let html = '<table><tr><th>sessionId</th><th>类型</th><th>设备 / 通道</th><th>状态</th><th>大小</th><th></th></tr>';
+  for (const s of list) {
+    const finished = ['COMPLETED', 'FAILED', 'STOPPED'].indexOf(s.status) >= 0;
+    const size = s.fileSize ? (s.fileSize / 1048576).toFixed(1) + ' MB' : '-';
+    html += `<tr><td class="mono" title="${esc(s.sessionId)}">${esc(s.sessionId.slice(0, 8))}…</td>` +
+      `<td>${esc(s.type)}</td>` +
+      `<td>${esc((s.deviceId || '-') + ' ch' + (s.channel == null ? '-' : s.channel))}</td>` +
+      `<td><span class="status s-${esc(s.status)}">${esc(s.status)}</span></td>` +
+      `<td>${size}</td>` +
+      `<td>${finished ? '' : `<button class="danger" onclick="stopSession('${s.sessionId}')">停止</button>`}</td></tr>`;
   }
   $('sessions').innerHTML = html + '</table>';
 }
+
+/** 开新会话后拉一次服务端列表（ERP 开的流也能看到） */
+function addSession(id, type, desc) {
+  loadSessions();
+}
+
 async function stopSession(id) {
   try { await api('/api/v1/sessions/' + id, { method: 'DELETE' }); } catch (e) {}
+  loadSessions();
 }
 
 checkHealth();
 loadDevices();
+if (keyEl.value.trim()) loadSessions();   // 有 Key 才拉会话列表，避免启动时就报 401
 </script>
 </body>
 </html>
