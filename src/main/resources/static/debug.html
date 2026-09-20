@@ -1,577 +1,149 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ISUP 调试台</title>
-<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
-<style>
-  :root {
-    --bg: #12151c;
-    --panel: #1a1f2b;
-    --panel-2: #222836;
-    --border: #2c3446;
-    --text: #dfe4ee;
-    --muted: #8b95a9;
-    --accent: #4f9cf9;
-    --ok: #3ecf8e;
-    --warn: #f0b429;
-    --err: #f26d6d;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; padding: 20px;
-    background: var(--bg); color: var(--text);
-    font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
-  }
-  h1 { font-size: 18px; margin: 0 0 4px; }
-  h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); font-weight: 600; }
-  .hint { color: var(--muted); font-size: 12px; }
-  .warn-bar {
-    background: rgba(240,180,41,.12); border: 1px solid rgba(240,180,41,.35);
-    color: var(--warn); padding: 8px 12px; border-radius: 6px; margin-bottom: 16px; font-size: 12px;
-  }
-  .card {
-    background: var(--panel); border: 1px solid var(--border);
-    border-radius: 8px; padding: 16px; margin-bottom: 16px;
-  }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
-  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
-  input, select {
-    width: 100%; padding: 7px 9px; background: var(--panel-2);
-    border: 1px solid var(--border); border-radius: 5px; color: var(--text);
-    font-size: 13px; font-family: inherit;
-  }
-  input:focus, select:focus { outline: none; border-color: var(--accent); }
-  input.input-error { border-color: var(--err); box-shadow: 0 0 0 2px rgba(242,109,109,.18); }
-  button {
-    padding: 7px 14px; background: var(--panel-2); color: var(--text);
-    border: 1px solid var(--border); border-radius: 5px;
-    cursor: pointer; font-size: 13px; font-family: inherit;
-  }
-  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-  button:disabled { opacity: .45; cursor: not-allowed; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #0b1220; font-weight: 600; }
-  button.primary:hover:not(:disabled) { filter: brightness(1.12); color: #0b1220; }
-  button.danger:hover:not(:disabled) { border-color: var(--err); color: var(--err); }
-  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
-  .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
-  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
-  video {
-    width: 100%; aspect-ratio: 16/9; background: #000;
-    border-radius: 6px; display: block;
-  }
-  .status { font-size: 12px; padding: 2px 8px; border-radius: 10px; border: 1px solid; }
-  .s-STARTING { color: var(--warn); border-color: rgba(240,180,41,.5); }
-  .s-RUNNING  { color: var(--ok);   border-color: rgba(62,207,142,.5); }
-  .s-COMPLETED{ color: var(--ok);   border-color: rgba(62,207,142,.5); }
-  .s-FAILED   { color: var(--err);  border-color: rgba(242,109,109,.5); }
-  .s-STOPPED  { color: var(--muted);border-color: var(--border); }
-  .s-UP       { color: var(--ok);   border-color: rgba(62,207,142,.5); }
-  table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
-  th { color: var(--muted); font-weight: 600; }
-  td.mono, .mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
-  .dev-item { cursor: pointer; }
-  .dev-item:hover { background: var(--panel-2); }
-  #log {
-    height: 220px; overflow-y: auto; background: #0d1017;
-    border: 1px solid var(--border); border-radius: 6px;
-    padding: 10px; font-family: ui-monospace, Menlo, Consolas, monospace;
-    font-size: 12px; white-space: pre-wrap; word-break: break-all;
-  }
-  .log-ok { color: var(--ok); } .log-err { color: var(--err); }
-  .log-req { color: var(--accent); } .log-time { color: var(--muted); }
-  .empty { color: var(--muted); font-size: 12px; padding: 8px 0; }
-</style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>ISUP 视频管理</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="./debug/console.css">
+  <script type="module" src="./debug/console.js"></script>
 </head>
 <body>
+  <a class="skip-link" href="#main">跳转到主要内容</a>
+  <svg class="svg-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="icon-video" viewBox="0 0 24 24"><rect x="3" y="5" width="13" height="14" rx="2"/><path d="m16 10 5-3v10l-5-3"/></symbol>
+    <symbol id="icon-history" viewBox="0 0 24 24"><path d="M3 11a9 9 0 1 1 2.7 7M3 4v7h7m2-4v5l3 2"/></symbol>
+    <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></symbol>
+    <symbol id="icon-list" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></symbol>
+    <symbol id="icon-settings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></symbol>
+    <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 7A9 9 0 0 0 4 6L2 9m0-6v6h6m-4 8a9 9 0 0 0 16 1l2-3m0 6v-6h-6"/></symbol>
+    <symbol id="icon-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+    <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="10" cy="10" r="6"/><path d="m15 15 6 6"/></symbol>
+  </svg>
+  <aside class="sidebar" id="sidebar" aria-label="主导航">
+    <a class="brand" href="#preview"><span class="brand-mark">IS</span><span class="brand-text">ISUP 管理平台<small>视频接入控制台</small></span></a>
+    <nav>
+      <p class="nav-group">视频管理</p>
+      <a class="nav-item" href="#preview" data-page="preview"><svg><use href="#icon-video"/></svg><span>实时预览</span></a>
+      <a class="nav-item" href="#playback" data-page="playback"><svg><use href="#icon-history"/></svg><span>录像回放</span></a>
+      <p class="nav-group">任务管理</p>
+      <a class="nav-item" href="#download" data-page="download"><svg><use href="#icon-download"/></svg><span>录像下载</span></a>
+      <a class="nav-item" href="#sessions" data-page="sessions"><svg><use href="#icon-list"/></svg><span>会话管理</span></a>
+      <p class="nav-group">系统工具</p>
+      <a class="nav-item" href="#logs" data-page="logs"><svg><use href="#icon-list"/></svg><span>请求日志</span></a>
+      <button class="nav-item" type="button" data-action="settings"><svg><use href="#icon-settings"/></svg><span>连接配置</span></button>
+    </nav>
+    <div class="sidebar-footer"><span class="sidebar-dot"></span> 海康 ISUP 5.0 <small>内网联调工作台</small></div>
+  </aside>
+  <button class="sidebar-mask" type="button" data-action="menu" aria-label="关闭导航" hidden></button>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="topbar-left">
+        <button class="icon-button" id="menu-toggle" type="button" data-action="menu" aria-controls="sidebar" aria-expanded="false" aria-label="展开导航"><svg><use href="#icon-menu"/></svg></button>
+        <nav class="breadcrumb" aria-label="面包屑"><span>视频接入</span><span class="separator">/</span><span id="breadcrumb-page">实时预览</span></nav>
+      </div>
+      <div class="topbar-right"><span id="connection-state" class="connection-state">未连接</span><button type="button" data-action="settings" class="text-button">连接配置</button></div>
+    </header>
+    <main id="main" tabindex="-1">
+      <div class="page-heading">
+        <div><h1 id="page-title">实时预览</h1><p id="page-description">选择在线设备，发起视频预览并查看推流状态。</p></div>
+        <button type="button" id="refresh-all" data-action="refresh"><svg><use href="#icon-refresh"/></svg>刷新数据</button>
+      </div>
+      <div class="notice" role="note"><span class="notice-label">安全提示</span><span>仅供内网联调；媒体路径 /media/** 不鉴权，请勿将服务端口直接暴露到公网。</span></div>
+      <div id="feedback" class="feedback" role="alert" hidden><span id="feedback-text"></span><button type="button" data-action="dismiss" aria-label="关闭提示">关闭</button></div>
+      <section class="summary-grid" aria-label="服务概况">
+        <article class="stat-card"><span class="stat-label">服务状态</span><strong id="stat-service">未检查</strong><span id="stat-uptime" class="stat-note">等待健康检查</span></article>
+        <article class="stat-card"><span class="stat-label">SDK 状态</span><strong id="stat-sdk">—</strong><span id="stat-ports" class="stat-note">注册 / 预览 / 回放端口</span></article>
+        <article class="stat-card"><span class="stat-label">在线设备</span><strong id="stat-devices">—</strong><span class="stat-note">设备注册成功后显示</span></article>
+        <article class="stat-card"><span class="stat-label">进行中会话</span><strong id="stat-sessions">—</strong><span class="stat-note">包含 ERP 发起的会话</span></article>
+      </section>
 
-<h1>ISUP 调试台</h1>
-<div class="hint">海康 ISUP 5.0 接入服务 · 联调用，验证设备注册、预览、回放、下载是否打通</div>
-
-<div class="warn-bar">
-  本页仅供内网联调。页面会调用 <b>/api/v1/**</b>（需 X-API-Key），API Key 明文保存在浏览器 localStorage；
-  <b>/media/**</b> 不鉴权。请勿把 8080 暴露到公网。
-</div>
-
-<!-- 连接配置 -->
-<div class="card">
-  <h2>连接</h2>
-  <div class="grid">
-    <div>
-      <label>服务地址</label>
-      <input id="base" placeholder="http://127.0.0.1:8080">
-    </div>
-    <div>
-      <label>API Key（X-API-Key）</label>
-      <input id="apikey" type="password" placeholder="isup.api-key">
-    </div>
-  </div>
-  <div class="row">
-    <button class="primary" onclick="checkHealth()">健康检查</button>
-    <button onclick="loadDevices()">刷新设备</button>
-    <span id="health" class="hint"></span>
-  </div>
-</div>
-
-<div class="layout">
-  <!-- 左：设备 + 播放 -->
-  <div>
-    <div class="card">
-      <h2>在线设备（点击填入 deviceId）</h2>
-      <div id="devices"><div class="empty">未加载</div></div>
-    </div>
-
-    <div class="card">
-      <h2>实时预览</h2>
-      <div class="grid">
-        <div><label>deviceId</label><input id="pv-device" placeholder="GW4206623"></div>
-        <div><label>channel</label><input id="pv-channel" type="number" value="1" min="1"></div>
-        <div>
-          <label>码流</label>
-          <select id="pv-stream">
-            <option value="0">0 主码流</option>
-            <option value="1">1 子码流</option>
-            <option value="2">2 第三码流</option>
-          </select>
+      <section id="view-monitor" class="view" aria-label="视频工作区">
+        <div class="monitor-layout">
+          <aside class="panel device-panel">
+            <div class="panel-heading"><h2>在线设备 <span id="device-count" class="count">0</span></h2><button type="button" class="icon-button" id="refresh-devices" data-action="devices" aria-label="刷新设备"><svg><use href="#icon-refresh"/></svg></button></div>
+            <div class="device-search"><label class="sr-only" for="device-search">搜索设备编号或 IP</label><div class="search-input"><svg><use href="#icon-search"/></svg><input id="device-search" type="search" placeholder="搜索设备编号 / IP" autocomplete="off"></div></div>
+            <div id="devices" class="device-list" aria-live="polite"><p class="empty-state">配置 API Key 后加载设备</p></div>
+            <p class="panel-footnote">选择设备后自动填入操作表单，也可手动输入设备编号。</p>
+          </aside>
+          <article class="panel monitor-panel">
+            <div class="panel-heading"><h2 id="monitor-title">预览配置</h2><span class="tag">HLS 播放</span></div>
+            <form id="preview-form" class="operation-form" novalidate>
+              <div class="form-grid preview-grid">
+                <div class="field"><label for="pv-device">设备编号 <span class="required">*</span></label><input id="pv-device" name="deviceId" placeholder="选择或输入 deviceId" required autocomplete="off"></div>
+                <div class="field"><label for="pv-channel">通道号 <span class="required">*</span></label><input id="pv-channel" name="channel" type="number" min="1" step="1" value="1" required></div>
+                <div class="field"><label for="pv-stream">码流类型</label><select id="pv-stream"><option value="0">主码流</option><option value="1">子码流</option><option value="2">第三码流</option></select></div>
+                <div class="field"><label for="pv-link">传输方式</label><select id="pv-link"><option value="">跟随服务配置</option><option value="0">TCP</option><option value="1">UDP</option><option value="2">HRUDP</option></select></div>
+              </div>
+              <div class="form-actions"><button class="primary" id="preview-submit" type="submit">开始预览</button><span id="pv-status" class="form-status" role="status"></span></div>
+            </form>
+            <form id="playback-form" class="operation-form" novalidate hidden>
+              <div class="form-grid two-column">
+                <div class="field"><label for="pb-device">设备编号 <span class="required">*</span></label><input id="pb-device" name="deviceId" placeholder="选择或输入 deviceId" required autocomplete="off"></div>
+                <div class="field"><label for="pb-channel">通道号 <span class="required">*</span></label><input id="pb-channel" name="channel" type="number" min="1" step="1" value="1" required></div>
+                <div class="field"><label for="pb-start">开始时间 <span class="required">*</span></label><input id="pb-start" type="datetime-local" step="1" required></div>
+                <div class="field"><label for="pb-end">结束时间 <span class="required">*</span></label><input id="pb-end" type="datetime-local" step="1" required></div>
+              </div>
+              <div class="range-shortcuts"><span>快捷时间</span><button type="button" data-range="10" data-prefix="pb">最近 10 分钟</button><button type="button" data-range="60" data-prefix="pb">最近 1 小时</button><button type="button" data-range="1440" data-prefix="pb">最近 24 小时</button></div>
+              <p class="field-help">按录像机本地时间查询；快捷时间使用当前电脑时间，请确认两端时间一致。</p>
+              <div class="form-actions"><button class="primary" id="playback-submit" type="submit">开始回放</button><span id="pb-status" class="form-status" role="status"></span></div>
+            </form>
+            <div class="player-stage">
+              <video id="video" controls muted autoplay playsinline aria-label="监控视频播放器"></video>
+              <div id="player-placeholder" class="player-placeholder"><svg><use href="#icon-video"/></svg><strong id="player-title">等待播放</strong><span id="player-hint">选择设备并点击「开始预览」</span></div>
+            </div>
+            <div class="player-toolbar"><div class="player-info"><span id="player-status" class="tag">未播放</span><span id="play-meta" class="mono ellipsis">尚未创建播放会话</span></div><div class="button-group"><button type="button" id="reload-player" data-action="reload" disabled>重载流</button><button type="button" id="stop-player" class="danger" data-action="stop-player" disabled>停止播放</button></div></div>
+          </article>
         </div>
-        <div>
-          <label>链路</label>
-          <select id="pv-link">
-            <option value="">跟随全局配置</option>
-            <option value="0">0 TCP</option>
-            <option value="1">1 UDP</option>
-            <option value="2">2 HRUDP</option>
-          </select>
+      </section>
+
+      <section id="view-download" class="view" aria-label="录像下载" hidden>
+        <div class="download-layout">
+          <article class="panel"><div class="panel-heading"><h2>创建下载任务</h2><span class="tag">MP4</span></div>
+            <form id="download-form" class="operation-form" novalidate>
+              <div class="form-grid two-column">
+                <div class="field"><label for="dl-device">设备编号 <span class="required">*</span></label><input id="dl-device" name="deviceId" list="device-options" placeholder="输入或选择 deviceId" required autocomplete="off"><datalist id="device-options"></datalist></div>
+                <div class="field"><label for="dl-channel">通道号 <span class="required">*</span></label><input id="dl-channel" name="channel" type="number" min="1" step="1" value="1" required></div>
+                <div class="field full-width"><label for="dl-start">开始时间 <span class="required">*</span></label><input id="dl-start" type="datetime-local" step="1" required></div>
+                <div class="field full-width"><label for="dl-end">结束时间 <span class="required">*</span></label><input id="dl-end" type="datetime-local" step="1" required></div>
+              </div>
+              <div class="range-shortcuts"><button type="button" data-range="10" data-prefix="dl">最近 10 分钟</button><button type="button" data-range="60" data-prefix="dl">最近 1 小时</button><button type="button" data-range="1440" data-prefix="dl">最近 24 小时</button></div>
+              <p class="field-help">按录像机本地时间填写。服务端异步生成 MP4，完成后再保存文件。</p>
+              <div class="form-actions"><button class="primary" id="download-submit" type="submit">创建下载任务</button></div>
+            </form>
+          </article>
+          <article class="panel"><div class="panel-heading"><h2>当前下载任务</h2><span id="dl-status" class="tag" role="status">未创建</span></div><div class="task-content">
+            <div class="task-illustration"><svg><use href="#icon-download"/></svg></div><h3 id="dl-title">暂无下载任务</h3><p id="dl-hint" class="muted">填写左侧参数，创建录像下载任务。</p>
+            <dl class="description-list"><dt>任务编号</dt><dd id="dl-id" class="mono">—</dd><dt>设备 / 通道</dt><dd id="dl-device-meta">—</dd><dt>接收数据</dt><dd id="dl-size">—</dd><dt>时间范围</dt><dd id="dl-range">—</dd></dl>
+            <button class="primary" type="button" id="dl-save" data-action="save-current" disabled>保存 MP4 文件</button><p class="field-help">历史下载任务可在「会话管理」中筛选和保存。</p>
+          </div></article>
         </div>
-      </div>
-      <div class="row">
-        <button class="primary" onclick="startPreview()">开始预览</button>
-        <button class="danger" onclick="stopPlayer()">停止</button>
-        <span id="pv-status"></span>
-      </div>
-    </div>
+      </section>
 
-    <div class="card">
-      <h2>按时间段回放</h2>
-      <div class="grid">
-        <div><label>deviceId</label><input id="pb-device" placeholder="GW4206623"></div>
-        <div><label>channel</label><input id="pb-channel" type="number" value="1" min="1"></div>
-        <div><label>开始（设备本地时间）</label><input id="pb-start" placeholder="2026-09-19 14:00:00"></div>
-        <div><label>结束</label><input id="pb-end" placeholder="2026-09-19 14:10:00"></div>
-      </div>
-      <div class="row">
-        <button onclick="fillRange(10)">最近 10 分钟</button>
-        <button onclick="fillRange(60)">最近 1 小时</button>
-        <button onclick="fillRange(24*60)">最近 24 小时</button>
-      </div>
-      <div class="row">
-        <button class="primary" onclick="startPlayback()">开始回放</button>
-        <button class="danger" onclick="stopPlayer()">停止</button>
-        <span id="pb-status"></span>
-      </div>
-    </div>
+      <section id="view-sessions" class="view" aria-label="会话管理" hidden>
+        <article class="panel">
+          <form id="session-filter" class="filter-form"><div class="field"><label for="session-search">关键字</label><input id="session-search" type="search" placeholder="会话编号 / 设备编号"></div><div class="field"><label for="session-type">会话类型</label><select id="session-type"><option value="">全部类型</option><option value="PREVIEW">实时预览</option><option value="PLAYBACK">录像回放</option><option value="DOWNLOAD">录像下载</option></select></div><div class="field"><label for="session-status">会话状态</label><select id="session-status"><option value="">全部状态</option><option value="STARTING">启动中</option><option value="RUNNING">进行中</option><option value="COMPLETED">已完成</option><option value="FAILED">失败</option><option value="STOPPED">已停止</option></select></div><div class="filter-actions"><button type="submit" class="primary">查询</button><button type="reset">重置</button></div></form>
+          <div class="panel-heading"><div><h2>会话列表</h2><p class="section-description">包含 ERP 发起的会话；停止操作会同时终止服务端任务。</p></div><div class="table-tools"><label class="checkbox-label"><input id="auto-refresh" type="checkbox" checked>自动刷新</label><button type="button" id="refresh-sessions" data-action="sessions"><svg><use href="#icon-refresh"/></svg>刷新</button></div></div>
+          <div class="table-scroll"><table><caption class="sr-only">服务端会话列表</caption><thead><tr><th scope="col">会话编号</th><th scope="col">类型</th><th scope="col">设备 / 通道</th><th scope="col">状态</th><th scope="col">文件大小</th><th scope="col">创建时间</th><th scope="col" class="actions-column">操作</th></tr></thead><tbody id="sessions-body"><tr><td colspan="7" class="empty-cell">配置 API Key 后加载会话</td></tr></tbody></table></div>
+          <div class="table-footer"><span id="session-count">共 0 条</span><div class="pagination"><label for="page-size" class="sr-only">每页条数</label><select id="page-size"><option value="10">10 条 / 页</option><option value="20">20 条 / 页</option><option value="50">50 条 / 页</option></select><button type="button" id="page-prev" data-action="page-prev" disabled>上一页</button><span id="page-number">1 / 1</span><button type="button" id="page-next" data-action="page-next" disabled>下一页</button></div></div>
+        </article>
+      </section>
+
+      <section id="view-logs" class="view" aria-label="请求日志" hidden>
+        <article class="panel"><div class="panel-heading"><div><h2>请求日志 <span id="log-count" class="count">0</span></h2><p class="section-description">只记录本页请求，不展示 API Key；最多保留最近 300 条。</p></div><div class="table-tools"><label for="log-level" class="sr-only">日志级别</label><select id="log-level"><option value="">全部级别</option><option value="error">错误</option><option value="success">成功</option><option value="request">请求</option><option value="info">提示</option></select><button type="button" data-action="clear-log">清空日志</button></div></div><div id="log" class="log-list" role="log" aria-label="接口请求日志"></div></article>
+      </section>
+      <footer class="page-footer"><span id="current-base">尚未连接服务</span><span>ISUP Server · 内网联调</span></footer>
+    </main>
   </div>
-
-  <!-- 右：播放器 + 下载 -->
-  <div>
-    <div class="card">
-      <h2>播放器（HLS）</h2>
-      <video id="video" controls muted autoplay playsinline></video>
-      <div class="row">
-        <span id="play-meta" class="hint mono"></span>
-        <button onclick="reloadPlayer()">重载流</button>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>录像下载（异步 → MP4）</h2>
-      <div class="grid">
-        <div><label>deviceId</label><input id="dl-device" placeholder="GW4206623"></div>
-        <div><label>channel</label><input id="dl-channel" type="number" value="1" min="1"></div>
-        <div><label>开始</label><input id="dl-start" placeholder="2026-09-19 14:00:00"></div>
-        <div><label>结束</label><input id="dl-end" placeholder="2026-09-19 14:10:00"></div>
-      </div>
-      <div class="row">
-        <button class="primary" onclick="startDownload()">创建下载任务</button>
-        <span id="dl-status"></span>
-        <button id="dl-save" disabled onclick="saveFile()">保存 MP4</button>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>服务端会话（含 ERP 发起的，进行中每 3 秒自动刷新）</h2>
-      <div id="sessions"><div class="empty">无</div></div>
-    </div>
-  </div>
-</div>
-
-<div class="card">
-  <h2>请求日志</h2>
-  <div id="log"></div>
-</div>
-
-<script>
-const $ = id => document.getElementById(id);
-
-/* ---------- 连接配置 ---------- */
-const baseEl = $('base'), keyEl = $('apikey');
-
-(function init() {
-  const saved = localStorage.getItem('isup-debug') || '{}';
-  const cfg = JSON.parse(saved);
-  baseEl.value = cfg.base || location.origin;
-  keyEl.value = cfg.key || '';
-})();
-function saveCfg() {
-  localStorage.setItem('isup-debug', JSON.stringify({ base: baseEl.value.trim(), key: keyEl.value.trim() }));
-}
-baseEl.addEventListener('change', saveCfg);
-keyEl.addEventListener('change', saveCfg);
-
-function baseUrl() { return baseEl.value.trim().replace(/\/+$/, ''); }
-/** playUrl 是 /media/... 相对路径，拼到服务地址上 */
-function resolve(p) { return /^https?:/i.test(p) ? p : baseUrl() + p; }
-
-/* ---------- 日志 ---------- */
-function log(msg, cls) {
-  const t = new Date().toTimeString().slice(0, 8);
-  const line = document.createElement('div');
-  line.innerHTML = `<span class="log-time">${t}</span> ` +
-                   (cls ? `<span class="${cls}">${esc(msg)}</span>` : esc(msg));
-  const box = $('log');
-  box.appendChild(line);
-  box.scrollTop = box.scrollHeight;
-}
-function esc(s) {
-  return String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
-}
-
-/** 401 时把 API Key 输入框标红并给出明确指引，避免只看到一句「缺少 X-API-Key 请求头」不知道怎么办 */
-function flagKeyError() {
-  keyEl.classList.add('input-error');
-  keyEl.focus();
-  log('提示：在页面顶部「API Key」框填入 isup.api-key（本机在 config/application.yml 里），填一次会自动记住', 'log-err');
-}
-
-/** 必填项为空时标红对应输入框 */
-function flagEmpty(id, name) {
-  const el = $(id);
-  el.classList.add('input-error');
-  el.focus();
-  log(`${name} 不能为空${sessionListHint()}`,
-      'log-err');
-}
-
-function sessionListHint() {
-  return '（可点上方的在线设备列表自动填入；列表为空说明设备还没注册上来）';
-}
-
-/** 输入时清掉标红 */
-document.addEventListener('input', e => {
-  if (e.target && e.target.classList) e.target.classList.remove('input-error');
-});
-
-/* ---------- HTTP ---------- */
-async function api(path, options) {
-  const opt = options || {};
-  const headers = { 'Content-Type': 'application/json' };
-  const key = keyEl.value.trim();
-  if (key) headers['X-API-Key'] = key;
-  Object.assign(headers, opt.headers || {});
-  const quiet = !!opt.quiet;   // 轮询用：不刷日志
-  if (!quiet) log(`→ ${opt.method || 'GET'} ${path}`, 'log-req');
-  let res;
-  try {
-    res = await fetch(baseUrl() + path, { method: opt.method || 'GET', headers, body: opt.body });
-  } catch (e) {
-    if (!quiet) log(`✗ 网络错误：${e.message}（服务地址不通或被浏览器拦截）`, 'log-err');
-    throw e;
-  }
-  const text = await res.text();
-  let data = null;
-  try { data = text ? JSON.parse(text) : null; } catch (_) { data = text; }
-  if (!res.ok) {
-    const msg = data && data.message ? data.message : text;
-    if (!quiet) {
-      log(`✗ ${res.status} ${esc(msg)}`, 'log-err');
-      if (res.status === 401) flagKeyError();
-    }
-    throw new Error(`${res.status} ${msg}`);
-  }
-  if (!quiet) log(`✓ ${res.status} ${JSON.stringify(data).slice(0, 400)}`, 'log-ok');
-  return data;
-}
-
-/* ---------- 健康检查 / 设备 ---------- */
-async function checkHealth() {
-  try {
-    const h = await api('/api/health');
-    $('health').innerHTML =
-      `<span class="status s-${h.status}">${h.status}</span> ` +
-      `SDK:${h.sdkReady ? '就绪' : '未就绪'} · 在线设备:${h.onlineDevices} · 会话:${h.activeSessions} · ` +
-      `publicIp:${esc(h.publicIp)} · ${h.cmsPort}/${h.previewPort}/${h.playbackPort} · 已运行 ${h.uptimeSeconds}s`;
-  } catch (e) { $('health').textContent = '健康检查失败'; }
-}
-
-async function loadDevices() {
-  let list;
-  try { list = await api('/api/v1/devices'); } catch (e) {
-    $('devices').innerHTML = '<div class="empty">加载失败，看日志</div>'; return;
-  }
-  if (!list || !list.length) {
-    $('devices').innerHTML = '<div class="empty">没有在线设备 —— 检查 7660 端口、ehome-key、录像机 ISUP 5.0 配置</div>';
-    return;
-  }
-  let html = '<table><tr><th>deviceId</th><th>IP</th><th>状态</th><th>上线时间</th></tr>';
-  for (const d of list) {
-    html += `<tr class="dev-item" onclick="pick('${esc(d.deviceId)}')">` +
-      `<td class="mono">${esc(d.deviceId)}</td><td class="mono">${esc(d.deviceIp || '-')}</td>` +
-      `<td>${d.online ? '<span class="status s-RUNNING">在线</span>' : '<span class="status s-STOPPED">离线</span>'}</td>` +
-      `<td>${esc(d.onlineTime || '-')}</td></tr>`;
-  }
-  $('devices').innerHTML = html + '</table>';
-}
-function pick(deviceId) {
-  ['pv-device', 'pb-device', 'dl-device'].forEach(id => { $(id).value = deviceId; });
-  log(`已填入 deviceId=${deviceId}`);
-}
-
-/* ---------- 播放器 ---------- */
-let hls = null, currentSession = null, waitTimer = null;
-
-function stopPlayer() {
-  clearTimeout(waitTimer);
-  if (hls) { hls.destroy(); hls = null; }
-  const v = $('video');
-  v.pause(); v.removeAttribute('src'); v.load();
-  $('play-meta').textContent = '';
-  $('pv-status').innerHTML = '';
-  $('pb-status').innerHTML = '';
-  if (currentSession) stopSession(currentSession.sessionId);
-  currentSession = null;
-}
-
-function reloadPlayer() {
-  if (currentSession) attach(currentSession.playUrl, currentSession.sessionId);
-}
-
-/**
- * HLS 切片要等设备推流后才会生成，直接拉 index.m3u8 会 404。
- * 先轮询会话状态到 RUNNING，再挂流。
- */
-function playWhenReady(sessionId, playUrl, statusEl) {
-  clearTimeout(waitTimer);
-  let tries = 0;
-  const tick = async () => {
-    tries++;
-    try {
-      const s = await api('/api/v1/sessions/' + sessionId);
-      statusEl.innerHTML = `<span class="status s-${s.status}">${s.status}</span>`;
-      if (s.status === 'RUNNING') { attach(playUrl, sessionId); return; }
-      if (s.status === 'FAILED' || s.status === 'STOPPED') {
-        statusEl.innerHTML = `<span class="status s-${s.status}">${s.status}</span> 请查服务端日志`;
-        return;
-      }
-    } catch (e) { /* 网络问题继续重试 */ }
-    if (tries < 30) waitTimer = setTimeout(tick, 1000);
-    else statusEl.innerHTML = '<span class="status s-FAILED">等不到 RUNNING</span> 设备没推流，查 8003/8004 端口';
-  };
-  tick();
-}
-
-function attach(playUrl, sessionId) {
-  const url = resolve(playUrl);
-  const v = $('video');
-  if (hls) { hls.destroy(); hls = null; }
-  $('play-meta').textContent = url;
-  log(`加载 HLS：${url}`);
-  if (v.canPlayType('application/vnd.apple.mpegurl')) {
-    v.src = url;
-  } else if (window.Hls) {
-    if (!window.Hls.isSupported()) { log('浏览器不支持 HLS 且 hls.js 不可用', 'log-err'); return; }
-    hls = new window.Hls({ manifestLoadPolicy: { default: { maxTimeToFirstByteMs: 30000, maxLoadTimeMs: 60000, timeoutRetry: { maxNumRetry: 6, retryDelayMs: 1000, maxRetryDelayMs: 8000 }, errorRetry: { maxNumRetry: 8, retryDelayMs: 1500, maxRetryDelayMs: 8000 } } } });
-    hls.loadSource(url);
-    hls.attachMedia(v);
-    hls.on(window.Hls.Events.MANIFEST_PARSED, () => v.play().catch(() => {}));
-    hls.on(window.Hls.Events.ERROR, (e, data) => {
-      if (data && data.fatal) log(`HLS 致命错误：${data.type} / ${data.details}`, 'log-err');
-    });
-  } else {
-    log('hls.js 未加载（CDN 不可达？），Chrome/Edge 下无法播放 m3u8', 'log-err');
-  }
-  v.play().catch(() => {});
-}
-
-/* ---------- 预览 / 回放 ---------- */
-async function startPreview() {
-  const body = {
-    deviceId: $('pv-device').value.trim(),
-    channel: Number($('pv-channel').value),
-    streamType: Number($('pv-stream').value)
-  };
-  if (!body.deviceId) { flagEmpty('pv-device', 'deviceId'); return; }
-  const lm = $('pv-link').value;
-  if (lm !== '') body.linkMode = Number(lm);
-  try {
-    const r = await api('/api/v1/preview', { method: 'POST', body: JSON.stringify(body) });
-    currentSession = { sessionId: r.sessionId, playUrl: r.playUrl };
-    addSession(r.sessionId, 'PREVIEW', `${body.deviceId} ch${body.channel}`);
-    playWhenReady(r.sessionId, r.playUrl, $('pv-status'));
-  } catch (e) { $('pv-status').innerHTML = '<span class="status s-FAILED">失败</span>'; }
-}
-
-async function startPlayback() {
-  const body = {
-    deviceId: $('pb-device').value.trim(),
-    channel: Number($('pb-channel').value),
-    startTime: $('pb-start').value.trim(),
-    endTime: $('pb-end').value.trim()
-  };
-  if (!body.deviceId || !body.startTime || !body.endTime) {
-    if (!body.deviceId) flagEmpty('pb-device', 'deviceId');
-    else flagEmpty(body.startTime ? 'pb-end' : 'pb-start', body.startTime ? '结束时间' : '开始时间');
-    return;
-  }
-  try {
-    const r = await api('/api/v1/playback', { method: 'POST', body: JSON.stringify(body) });
-    currentSession = { sessionId: r.sessionId, playUrl: r.playUrl };
-    addSession(r.sessionId, 'PLAYBACK', `${body.deviceId} ch${body.channel}`);
-    playWhenReady(r.sessionId, r.playUrl, $('pb-status'));
-  } catch (e) { $('pb-status').innerHTML = '<span class="status s-FAILED">失败</span>'; }
-}
-
-function fillRange(minutes) {
-  const fmt = d => d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' +
-                   p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds());
-  const end = new Date(), start = new Date(end.getTime() - minutes * 60000);
-  ['pb', 'dl'].forEach(p => { $(p + '-start').value = fmt(start); $(p + '-end').value = fmt(end); });
-  log(`已填充最近 ${minutes} 分钟（按本机时间，注意录像机时间是否一致）`);
-}
-function p2(n) { return String(n).padStart(2, '0'); }
-
-/* ---------- 下载 ---------- */
-let downloadTask = null, dlTimer = null;
-
-async function startDownload() {
-  const body = {
-    deviceId: $('dl-device').value.trim(),
-    channel: Number($('dl-channel').value),
-    startTime: $('dl-start').value.trim(),
-    endTime: $('dl-end').value.trim()
-  };
-  if (!body.deviceId || !body.startTime || !body.endTime) {
-    if (!body.deviceId) flagEmpty('dl-device', 'deviceId');
-    else flagEmpty(body.startTime ? 'dl-end' : 'dl-start', body.startTime ? '结束时间' : '开始时间');
-    return;
-  }
-  $('dl-save').disabled = true;
-  try {
-    const r = await api('/api/v1/download', { method: 'POST', body: JSON.stringify(body) });
-    downloadTask = r.taskId;
-    addSession(r.taskId, 'DOWNLOAD', `${body.deviceId} ch${body.channel}`);
-    pollDownload(r.taskId);
-  } catch (e) { $('dl-status').innerHTML = '<span class="status s-FAILED">失败</span>'; }
-}
-
-function pollDownload(taskId) {
-  clearInterval(dlTimer);
-  let n = 0;
-  dlTimer = setInterval(async () => {
-    n++;
-    try {
-      const s = await api('/api/v1/sessions/' + taskId);
-      $('dl-status').innerHTML = `<span class="status s-${s.status}">${s.status}</span>`;
-      if (s.status === 'COMPLETED') {
-        clearInterval(dlTimer);
-        const mb = s.fileSize ? (s.fileSize / 1048576).toFixed(2) + ' MB' : '';
-        $('dl-status').innerHTML += ` ${mb} <button onclick="saveFile()">保存 MP4</button>`;
-        $('dl-save').disabled = false;
-        return;
-      }
-      if (s.status === 'FAILED' || s.status === 'STOPPED') { clearInterval(dlTimer); return; }
-    } catch (e) { clearInterval(dlTimer); }
-    if (n > 400) { clearInterval(dlTimer); log('下载轮询超时', 'log-err'); }
-  }, 1500);
-}
-
-/** /api/v1/download/{id}/file 需要 X-API-Key，不能用 <a href> 直接下，走 fetch + blob */
-async function saveFile() {
-  if (!downloadTask) return;
-  const key = keyEl.value.trim();
-  log(`→ GET /api/v1/download/${downloadTask}/file`, 'log-req');
-  try {
-    const res = await fetch(`${baseUrl()}/api/v1/download/${downloadTask}/file`,
-      { headers: key ? { 'X-API-Key': key } : {} });
-    if (!res.ok) { log(`✗ ${res.status} 下载文件失败`, 'log-err'); return; }
-    const blob = await res.blob();
-    const cd = res.headers.get('Content-Disposition') || '';
-    const m = /filename="([^"]+)"/.exec(cd);
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = m ? m[1] : `${downloadTask}.mp4`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-    log(`✓ 已保存 ${a.download}（${(blob.size / 1048576).toFixed(2)} MB）`, 'log-ok');
-  } catch (e) { log(`✗ ${e.message}`, 'log-err'); }
-}
-
-/* ---------- 会话列表（服务端全量，含 ERP 等外部发起的） ---------- */
-let sessionTimer = null;
-
-async function loadSessions() {
-  let list;
-  try {
-    list = await api('/api/v1/sessions', { quiet: true });
-  } catch (e) {
-    stopSessionPolling();
-    return;
-  }
-  list = list || [];
-  renderSessions(list);
-  // 只有存在进行中的会话才轮询，避免空转刷请求
-  if (list.some(s => s.status === 'STARTING' || s.status === 'RUNNING')) startSessionPolling();
-  else stopSessionPolling();
-}
-
-function startSessionPolling() {
-  if (sessionTimer) return;
-  sessionTimer = setInterval(loadSessions, 3000);
-}
-function stopSessionPolling() {
-  if (sessionTimer) { clearInterval(sessionTimer); sessionTimer = null; }
-}
-
-function renderSessions(list) {
-  if (!list.length) { $('sessions').innerHTML = '<div class="empty">当前没有会话</div>'; return; }
-  let html = '<table><tr><th>sessionId</th><th>类型</th><th>设备 / 通道</th><th>状态</th><th>大小</th><th></th></tr>';
-  for (const s of list) {
-    const finished = ['COMPLETED', 'FAILED', 'STOPPED'].indexOf(s.status) >= 0;
-    const size = s.fileSize ? (s.fileSize / 1048576).toFixed(1) + ' MB' : '-';
-    html += `<tr><td class="mono" title="${esc(s.sessionId)}">${esc(s.sessionId.slice(0, 8))}…</td>` +
-      `<td>${esc(s.type)}</td>` +
-      `<td>${esc((s.deviceId || '-') + ' ch' + (s.channel == null ? '-' : s.channel))}</td>` +
-      `<td><span class="status s-${esc(s.status)}">${esc(s.status)}</span></td>` +
-      `<td>${size}</td>` +
-      `<td>${finished ? '' : `<button class="danger" onclick="stopSession('${s.sessionId}')">停止</button>`}</td></tr>`;
-  }
-  $('sessions').innerHTML = html + '</table>';
-}
-
-/** 开新会话后拉一次服务端列表（ERP 开的流也能看到） */
-function addSession(id, type, desc) {
-  loadSessions();
-}
-
-async function stopSession(id) {
-  try { await api('/api/v1/sessions/' + id, { method: 'DELETE' }); } catch (e) {}
-  loadSessions();
-}
-
-checkHealth();
-loadDevices();
-if (keyEl.value.trim()) loadSessions();   // 有 Key 才拉会话列表，避免启动时就报 401
-</script>
+  <dialog id="settings-dialog" aria-labelledby="settings-title">
+    <form id="settings-form" novalidate>
+      <div class="panel-heading"><h2 id="settings-title">连接配置</h2><button type="button" class="text-button" data-action="close-settings" aria-label="关闭连接配置">关闭</button></div>
+      <div class="dialog-body"><div class="field"><label for="base">服务地址 <span class="required">*</span></label><input id="base" type="url" placeholder="http://127.0.0.1:8080" required><p class="field-help">默认使用当前服务地址。跨域访问需由服务端允许对应来源。</p></div><div class="field"><label for="apikey">API Key</label><div class="input-with-button"><input id="apikey" type="password" autocomplete="off" placeholder="填写 isup.api-key"><button type="button" id="toggle-key" data-action="toggle-key" aria-label="显示 API Key" aria-pressed="false">显示</button></div><p class="field-help">与服务端配置一致，通过 X-API-Key 请求头发送。</p></div><label class="checkbox-label"><input id="remember-key" type="checkbox">在此浏览器记住 API Key</label><p class="field-help">默认仅在当前标签页保存；勾选后将以明文保存在本地，不要在公共电脑上开启。</p><p id="settings-error" class="field-error" role="alert" hidden></p></div>
+      <div class="dialog-footer"><button type="button" data-action="close-settings">取消</button><button type="submit" class="primary" id="settings-submit">保存并连接</button></div>
+    </form>
+  </dialog>
+  <dialog id="stop-dialog" aria-labelledby="stop-title"><form method="dialog"><div class="panel-heading"><h2 id="stop-title">确认停止会话</h2></div><div class="dialog-body"><p>此操作将终止服务端会话，包括 ERP 正在使用的流或下载任务。</p><p id="stop-target" class="mono"></p></div><div class="dialog-footer"><button value="cancel">取消</button><button value="confirm" class="danger">确认停止</button></div></form></dialog>
+  <noscript><div class="noscript">请启用 JavaScript 后使用视频管理控制台。</div></noscript>
 </body>
 </html>
