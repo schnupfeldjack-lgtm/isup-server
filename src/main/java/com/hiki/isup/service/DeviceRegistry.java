@@ -38,7 +38,18 @@ public class DeviceRegistry {
             log.info("设备重注册，清理旧 lUserID：deviceId={}, oldLUserID={}, newLUserID={}",
                     deviceId, old.getLUserId(), lUserId);
         }
-        lUserMap.put(lUserId, deviceId);
+
+        // 同一 lUserID 上原本挂着别的 deviceId：说明有两个设备（或同一设备配了多个平台中心）
+        // 抢同一个登录句柄，会把彼此顶下线并留下残条目，必须清理并明确告警
+        String conflict = lUserMap.put(lUserId, deviceId);
+        if (conflict != null && !conflict.equals(deviceId)) {
+            deviceMap.remove(conflict);
+            log.warn("lUserID={} 上原有设备 {} 被 {} 顶替并移除。"
+                            + "若反复出现，说明设备同时注册了多个平台中心（中心1/中心2 都启用），"
+                            + "请只保留一个；SDK 日志可看到 Device Already Offline 与 DAS_REREGISTER 循环",
+                    lUserId, conflict, deviceId);
+        }
+
         log.info("设备上线：deviceId={}, lUserID={}, ip={}", deviceId, lUserId, deviceIp);
         return info;
     }

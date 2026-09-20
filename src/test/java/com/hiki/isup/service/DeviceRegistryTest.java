@@ -64,6 +64,22 @@ class DeviceRegistryTest {
     }
 
     @Test
+    @DisplayName("同一 lUserID 被另一台设备顶替时，旧设备被移除（设备配了多个平台中心会触发）")
+    void sameLUserIdTakenOverByAnotherDevice() {
+        registry.online(0, "GW9806924", "192.168.22.211", "SN-A", null);
+        // 同一台摄像头启用了中心1/中心2，两个 DeviceID 抢同一个 lUserID
+        registry.online(0, "GW9806925", "192.168.22.211", "SN-A", null);
+
+        assertEquals(1, registry.onlineCount(), "旧设备应被移除，避免留下永远在线的残条目");
+        assertNull(registry.get("GW9806924"));
+        assertNotNull(registry.get("GW9806925"));
+
+        // 下线回调只带 lUserID，应精确移除当前占用的那个
+        assertEquals("GW9806925", registry.offline(0));
+        assertEquals(0, registry.onlineCount());
+    }
+
+    @Test
     @DisplayName("设备不在线时取 lUserID 抛出明确异常")
     void requireLUserId() {
         registry.online(1001, "GW4206623", "1.2.3.4", "SN123", null);
