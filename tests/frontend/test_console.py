@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 STATIC = ROOT / 'src/main/resources/static'
 OFFLINE = os.getenv('OFFLINE_BROWSER') == '1'
 HLS_STUB = """
-window.hlsAttached = 0; window.hlsDestroyed = 0;
+window.hlsAttached = 0; window.hlsDestroyed = 0; window.lifecycleEvents = window.lifecycleEvents || [];
 window.Hls = class {
   static Events = { MANIFEST_PARSED: 'manifest', ERROR: 'error' };
   static isSupported() { return true; }
@@ -22,7 +22,7 @@ window.Hls = class {
   on(name, handler) { this.handlers[name] = handler; }
   loadSource(url) { window.lastHlsUrl = url; }
   attachMedia() { window.hlsAttached++; this.handlers.manifest?.(); }
-  destroy() { window.hlsDestroyed++; }
+  destroy() { window.hlsDestroyed++; window.lifecycleEvents.push('hls-destroy'); }
 };
 """
 
@@ -100,7 +100,7 @@ class ConsoleTest(unittest.TestCase):
         if path == '/health':
             data = {'status': 'UP', 'sdkReady': True, 'onlineDevices': len(self.devices),
                     'activeSessions': sum(s['status'] in ['STARTING', 'RUNNING'] for s in self.sessions),
-                    'uptimeSeconds': 32700, 'publicIp': '192.0.2.10', 'cmsPort': 7660, 'previewPort': 8003, 'playbackPort': 8004}
+                    'uptimeSeconds': 32700, 'publicIp': '192.0.2.10', 'cmsPort': 8660, 'previewPort': 8003, 'playbackPort': 8004}
         elif path == '/v1/devices':
             data = self.devices
         elif path == '/v1/sessions':
@@ -245,8 +245,13 @@ class ConsoleTest(unittest.TestCase):
         self.page.locator('#pb-device').fill('NVR-WAREHOUSE-01')
         self.page.locator('#pb-start').fill('2026-09-20T16:00')
         self.page.locator('#pb-end').fill('2026-09-20T15:00')
+        expect(self.page.locator('#pb-start-normalized')).to_have_text('实际提交：2026-09-20 16:00:00（24 小时制）')
         self.page.locator('#playback-submit').click()
-        expect(self.page.locator('#feedback')).to_contain_text('结束时间必须晚于开始时间')
+        expect(self.page.locator('#feedback')).to_contain_text('结束时间 2026-09-20 15:00:00 必须晚于开始时间 2026-09-20 16:00:00')
+        self.page.locator('#pb-start').fill('2026-09-20T11:31:47')
+        self.page.locator('#pb-end').fill('2026-09-20T00:23:46')
+        self.page.locator('#playback-submit').click()
+        expect(self.page.locator('#feedback')).to_contain_text('“上午 12 点”是凌晨 0 点')
         self.assertEqual([c for c in self.calls if c[0] == 'POST'], [])
 
     def test_preview_switch_stop_and_payload(self):
@@ -258,12 +263,21 @@ class ConsoleTest(unittest.TestCase):
         expect(self.page.locator('#player-status')).to_have_text('进行中')
         expect(self.page.locator('#stop-player')).to_be_enabled()
         self.page.wait_for_function('window.hlsAttached === 1')
+        self.page.evaluate("""() => {
+          window.lifecycleEvents = [];
+          const originalFetch = window.fetch;
+          window.fetch = (...args) => {
+            if ((args[1]?.method || 'GET') === 'DELETE') window.lifecycleEvents.push('delete');
+            return originalFetch(...args);
+          };
+        }""")
         self.click_nav('playback')
         self.page.locator('#pb-start').fill('2026-09-20T14:00')
         self.page.locator('#pb-end').fill('2026-09-20T14:10')
         self.page.locator('#playback-submit').click()
         expect(self.page.locator('#pb-status')).to_have_text('进行中')
         self.page.wait_for_function('window.hlsAttached === 2')
+        self.assertEqual(self.page.evaluate('window.lifecycleEvents.slice(0, 2)'), ['hls-destroy', 'delete'])
         writes = [c for c in self.calls if c[0] in ['POST', 'DELETE']]
         self.assertEqual([c[:2] for c in writes], [('POST', '/api/v1/preview'), ('DELETE', '/api/v1/sessions/task-1'), ('POST', '/api/v1/playback')])
         self.assertEqual(json.loads(writes[0][3]), {'deviceId': 'NVR-WAREHOUSE-01', 'channel': 1, 'streamType': 1, 'linkMode': 0})

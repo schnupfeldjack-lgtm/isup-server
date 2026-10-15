@@ -5,10 +5,17 @@ import com.sun.jna.Native;
 import com.sun.jna.Pointer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.stereotype.Component;
 
 import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 
 /**
  * 海康 ISUP SDK 动态库加载器（同时兼容 Linux x86_64 与 Windows）。
@@ -22,6 +29,13 @@ import java.nio.charset.StandardCharsets;
  *   HCISUPCMS.dll  HCISUPStream.dll  libeay32.dll  ssleay32.dll  HCAapSDKCom/
  * </pre>
  *
+ * <p>文件来源有两个，外部目录优先：</p>
+ * <ol>
+ *   <li>外部目录 {@code isup.sdk-dir}（默认 {@code ./sdk}）——换 SDK 不用重新打包；</li>
+ *   <li>打进 jar 的 {@code src/main/resources/native/win64} 或 {@code native/linux64}
+ *       ——启动时按需释放到 sdk-dir 缺失的那个文件，实现"开箱即用"。</li>
+ * </ol>
+ *
  * <p>初始化顺序严格遵循海康 Demo：
  * SetSDKInitCfg(crypto) -&gt; SetSDKInitCfg(ssl) -&gt; Init() -&gt; SetSDKLocalCfg(HCAapSDKCom)。</p>
  */
@@ -29,6 +43,9 @@ import java.nio.charset.StandardCharsets;
 public class NativeSdkLoader {
 
     private static final Logger log = LoggerFactory.getLogger(NativeSdkLoader.class);
+
+    /** 内置 SDK 在 classpath 中的根目录，按平台分子目录 */
+    private static final String BUNDLED_ROOT = "native/";
 
     /** 组件库目录配置类型 */
     private static final int LOCAL_CFG_COMPONENT_DIR = 5;
@@ -67,11 +84,14 @@ public class NativeSdkLoader {
         }
         File sdkDir = new File(properties.getSdkDir());
         String absSdkDir = sdkDir.getAbsolutePath();
-        if (!sdkDir.exists()) {
-            throw new IllegalStateException("海康 SDK 目录不存在：" + absSdkDir
-                    + "，请将 HCISUPCMS / HCISUPStream 等文件放入该目录");
-        }
         boolean linux = isLinux();
+        if (!sdkDir.exists() && !sdkDir.mkdirs()) {
+            throw new IllegalStateException("海康 SDK 目录不存在且无法创建：" + absSdkDir);
+        }
+        // 外部目录优先：只把本地缺的文件从 jar 里补出来
+        extractBundledSdk(sdkDir, linux);
+        // 让 JNA 在该目录里找库（Linux 下 libHCISUPCMS.so 依赖同目录的其它 so）
+        System.setProperty("jna.library.path", absSdkDir);
         log.info("开始加载海康 SDK，系统={}，SDK 目录={}", linux ? "Linux" : "Windows", absSdkDir);
 
         String cmsLib = new File(sdkDir, linux ? "libHCISUPCMS.so" : "HCISUPCMS.dll").getAbsolutePath();
@@ -152,6 +172,63 @@ public class NativeSdkLoader {
 
     // ==================== 内部工具 ====================
 
+    /**
+     * 把打进 jar 的 SDK 文件释放到 sdk-dir。
+     *
+     * <p>只补本地缺失的文件：目标已存在就跳过，因此外部目录始终优先，
+     * 线上换 SDK 只需往 ./sdk 丢文件，不必重新打包。</p>
+     */
+    private void extractBundledSdk(File sdkDir, boolean linux) {
+        String root = BUNDLED_ROOT + (linux ? "linux64" : "win64") + "/";
+        Resource[] resources;
+        try {
+            resources = new PathMatchingResourcePatternResolver().getResources("classpath*:" + root + "**");
+        } catch (IOException e) {
+            log.warn("扫描内置 SDK 资源失败，只使用外部目录：{}", e.getMessage());
+            return;
+        }
+        int copied = 0;
+        for (Resource resource : resources) {
+            String rel = relativePath(resource, root);
+            // 跳过目录条目（url 以 / 结尾）：否则目录会被当成 0 字节文件释放，
+            // 导致其下子文件释放失败（parent 是文件而非目录）
+            if (rel == null || rel.isBlank() || rel.endsWith("/")) {
+                continue;
+            }
+            File target = new File(sdkDir, rel);
+            if (target.exists()) {
+                continue;
+            }
+            try (InputStream in = resource.getInputStream()) {
+                File parent = target.getParentFile();
+                if (parent != null) {
+                    Files.createDirectories(parent.toPath());
+                }
+                Files.copy(in, target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                copied++;
+            } catch (IOException e) {
+                log.warn("释放内置 SDK 文件失败：{} -> {}，原因={}", rel, target, e.getMessage());
+            }
+        }
+        if (copied > 0) {
+            log.info("已从 jar 释放 {} 个海康 SDK 文件到 {}", copied, sdkDir.getAbsolutePath());
+        }
+    }
+
+    /** 取资源在平台目录下的相对路径（兼容目录部署与 jar 内嵌两种 URL 形态） */
+    private static String relativePath(Resource resource, String root) {
+        try {
+            String url = resource.getURL().toString();
+            int idx = url.indexOf(root);
+            if (idx < 0) {
+                return null;
+            }
+            return URLDecoder.decode(url.substring(idx + root.length()), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
     private void setPathCfg(HCISUPCMS sdk, int slot, String path, String operation) {
         HCISUPCMS.BYTE_ARRAY array = new HCISUPCMS.BYTE_ARRAY(256);
         byte[] bytes = path.getBytes(StandardCharsets.UTF_8);
@@ -195,7 +272,9 @@ public class NativeSdkLoader {
     private static void checkFile(String path, String name) {
         File file = new File(path);
         if (!file.exists()) {
-            throw new IllegalStateException("缺少海康 SDK 文件 " + name + "：" + path);
+            throw new IllegalStateException("缺少海康 SDK 文件 " + name + "：" + path
+                    + "。请放进该目录，或放到 src/main/resources/native/"
+                    + (isLinux() ? "linux64" : "win64") + "/ 后重新打包");
         }
     }
 

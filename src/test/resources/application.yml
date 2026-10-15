@@ -1,6 +1,15 @@
 server:
   port: 0
 
+spring:
+  # 测试只验证 HTTP 层，不需要真连库：初始连接数为 0，装配数据源但不建立物理连接
+  datasource:
+    url: jdbc:mysql://127.0.0.1:3306/isup_db?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai
+    username: test
+    password: test
+    druid:
+      initial-size: 0
+
 isup:
   # 测试环境不加载真实海康 SDK
   enabled: false
@@ -14,12 +23,12 @@ isup:
 
   cms:
     listen-ip: 0.0.0.0
-    listen-port: 7660
+    listen-port: 8660
 
   stream:
     listen-ip: 0.0.0.0
     preview-port: 8003
-    playback-port: 8004
+    playback-port: 8661
 
   ffmpeg:
     ps-input-format: mpeg
@@ -34,6 +43,22 @@ isup:
     start-timeout-sec: 30
     idle-timeout-sec: 120
     download-max-sec: 3600
+
+  waybill-video:
+    enabled: false
+    cron: "0 * * * * *"
+    channels: [1, 2]
+    batch-size: 5
+    poll-interval-ms: 0
+    stale-processing-minutes: 10
+    max-run-seconds: 0
+
+  oss:
+    endpoint: ""
+    bucket: ""
+    access-key-id: ""
+    access-key-secret: ""
+    prefix: waybill-video/
 
 logging:
   level:

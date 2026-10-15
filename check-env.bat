@@ -76,21 +76,21 @@ if not exist "%CFG%" (
 rem ---------- 5. 端口 ----------
 echo [5/6] 端口占用
 set "PORT_BUSY="
-for %%p in (7660 8003 8004 8080) do (
+for %%p in (8660 8003 8661 8080) do (
     netstat -ano | findstr /r /c:":%%p .*LISTENING" >nul
     if not errorlevel 1 set "PORT_BUSY=!PORT_BUSY! %%p"
 )
-if defined PORT_BUSY (echo      [警告] 已被占用：!PORT_BUSY! —— 服务会起不来) else (echo      [正常] 7660 8003 8004 8080 均空闲)
+if defined PORT_BUSY (echo      [警告] 已被占用：!PORT_BUSY! —— 服务会起不来) else (echo      [正常] 8660 8003 8661 8080 均空闲)
 
 rem ---------- 6. 防火墙 ----------
 echo [6/6] 防火墙（设备回连需要）
-netsh advfirewall firewall show rule name="ISUP-CMS-7660" >nul 2>&1
+netsh advfirewall firewall show rule name="ISUP-CMS-8660" >nul 2>&1
 if errorlevel 1 (
-    echo      [警告] 没找到 7660 入站放行规则，设备可能连不进来
-    echo             管理员终端执行（8003/8004 同理）：
-    echo             netsh advfirewall firewall add rule name="ISUP-CMS-7660" dir=in action=allow protocol=TCP localport=7660
+    echo      [警告] 没找到 8660 入站放行规则，设备可能连不进来
+    echo             管理员终端执行（8003/8661 同理）：
+    echo             netsh advfirewall firewall add rule name="ISUP-CMS-8660" dir=in action=allow protocol=TCP localport=8660
 ) else (
-    echo      [正常] 已存在 ISUP-CMS-7660 放行规则
+    echo      [正常] 已存在 ISUP-CMS-8660 放行规则
 )
 
 echo ============================================================

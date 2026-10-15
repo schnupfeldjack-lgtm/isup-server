@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import {
-  ApiClient, ApiError, downloadFilename, formatBytes, formatLocalDate,
-  isActive, normalizeBase, readConfig, resolveMediaUrl, toApiDateTime, writeConfig,
+  ApiClient, ApiError, describeApiDateTime, downloadFilename, formatBytes, formatLocalDate,
+  isActive, normalizeBase, readConfig, resolveMediaUrl, toApiDateTime, validateTimeRange, writeConfig,
 } from '../../src/main/resources/static/debug/console-utils.js';
 
 const originalFetch = globalThis.fetch;
@@ -138,4 +138,16 @@ test('切换连接可取消全部在途请求', async () => {
   client.abortAll();
   await assertion;
   assert.equal(client.controllers.size, 0);
+});
+
+test('时间范围使用 24 小时制说明实际值并解释上午 12 点', () => {
+  assert.equal(describeApiDateTime('2026-09-20T00:23:46'), '实际提交：2026-09-20 00:23:46（24 小时制）');
+  assert.deepEqual(validateTimeRange('2026-09-20T11:31:47', '2026-09-20T12:23:46'), {
+    startTime: '2026-09-20 11:31:47',
+    endTime: '2026-09-20 12:23:46',
+  });
+  assert.throws(
+    () => validateTimeRange('2026-09-20T11:31:47', '2026-09-20T00:23:46'),
+    /结束时间 2026-09-20 00:23:46 必须晚于开始时间 2026-09-20 11:31:47；“上午 12 点”是凌晨 0 点/,
+  );
 });

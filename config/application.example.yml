@@ -1,43 +1,29 @@
-# 配置模板：复制为 application.yml 后修改
-# cp config/application.example.yml config/application.yml
+# 复制为 application.yml 放在本目录，或通过环境变量覆盖（勿提交真实密钥到 Git）
 #
-# 必改三项：
-#   isup.public-ip     公网 IP（不能用 0.0.0.0 / 127.0.0.1）
-#   isup.ehome-key     与录像机上配置的 ISUP 密钥一致
-#   isup.api-key       ERP 调用用的 X-API-Key，建议随机生成
-
-server:
-  port: 8080
+# 常用环境变量：
+#   ISUP_API_KEY          ERP 请求头 X-API-Key
+#   ISUP_PUBLIC_IP        设备回连公网 IP
+#   ISUP_DB_PASSWORD      MySQL 密码（出库录像功能）
+#   ISUP_OSS_ACCESS_KEY_ID / ISUP_OSS_ACCESS_KEY_SECRET
 
 isup:
-  enabled: true
-  sdk-dir: ./sdk
-  public-ip: 请填写公网IP
-  ehome-key: 请填写与录像机一致的密钥
-  api-key: 请填写ERP调用密钥
-  ffmpeg-path: ffmpeg
-  media-dir: ./data/media
-  link-mode: 0
-
-  cms:
-    listen-ip: 0.0.0.0
-    listen-port: 7660
-
+  public-ip: ${ISUP_PUBLIC_IP:}
+  ehome-key: ${ISUP_EHOME_KEY:}
+  api-key: ${ISUP_API_KEY:}
+  # HLS 签名地址有效期，限制范围 60~86400 秒
+  media-url-ttl-seconds: ${ISUP_MEDIA_URL_TTL_SECONDS:7200}
   stream:
-    listen-ip: 0.0.0.0
-    preview-port: 8003
-    playback-port: 8004
+    # 回放与录像下载共用；云安全组和系统防火墙需放行 TCP 8661
+    playback-port: ${ISUP_PLAYBACK_PORT:8661}
+  oss:
+    endpoint: ${ISUP_OSS_ENDPOINT:}
+    static-domain: ${ISUP_OSS_STATIC_DOMAIN:}
+    bucket: ${ISUP_OSS_BUCKET:}
+    access-key-id: ${ISUP_OSS_ACCESS_KEY_ID:}
+    access-key-secret: ${ISUP_OSS_ACCESS_KEY_SECRET:}
 
-  ffmpeg:
-    ps-input-format: mpeg
-    codec-args: -c copy
-    hls-time: 2
-    hls-list-size: 6
-    hls-flags: delete_segments+append_list
-    mp4-args: -f mp4 -movflags +frag_keyframe+empty_moov
-    log-level: error
-
-  session:
-    start-timeout-sec: 30
-    idle-timeout-sec: 120
-    download-max-sec: 3600
+spring:
+  datasource:
+    url: ${ISUP_DB_URL:jdbc:mysql://127.0.0.1:3306/your_db?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai}
+    username: ${ISUP_DB_USERNAME:}
+    password: ${ISUP_DB_PASSWORD:}

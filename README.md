@@ -4,7 +4,11 @@
 
 技术栈：Java 21 + Spring Boot 3 + Maven 单体应用 + JNA 调用海康 HCISUP SDK + FFmpeg 转封装。
 
-**不使用** MySQL / Redis / Nacos / 微服务 / 前端管理页面。设备与会话状态全部保存在内存。
+**不使用** Redis / Nacos / 微服务。设备与会话状态在内存；**出库包裹录像**（`isup.waybill-video`）可选接 MySQL 扫表 + 阿里云 OSS。
+
+敏感配置（`api-key`、数据库密码、OSS 密钥）请用环境变量或 jar 旁 `config/application.yml`（勿提交仓库），见 `config/application.example.yml`。
+
+仓库内的 dev / dev-test / prod 配置不包含真实凭据。首次部署或替换旧版内置配置前，必须在外置配置中提供公网地址、设备接入密钥、ERP API 密钥，以及启用录像同步所需的数据库和 OSS 配置。复制示例后填写现有环境的值；不要把旧的完整配置覆盖回源码，也不要将私有备份、生产录像、日志或构建目录提交到仓库。
 
 ---
 
@@ -28,14 +32,14 @@
 
 ```
 ┌──────────────┐        ISUP 5.0 注册            ┌─────────────────────────────┐
-│  海康 NVR    │ ──────────────────────────────▶ │  CMS 注册服务  TCP 7660     │
+│  海康 NVR    │ ──────────────────────────────▶ │  CMS 注册服务  TCP 8660     │
 │  / IPC       │       (AUTH/SessionKey/DAS)     │  NET_ECMS_StartListen       │
 │              │                                 └─────────────┬───────────────┘
 │              │        实时预览码流(PS)                        │
 │              │ ──────────────────────────────▶ ┌─────────────▼───────────────┐
 │              │        回放/下载码流(PS)         │  流媒体监听                 │
 │              │ ──────────────────────────────▶ │  预览       TCP 8003        │
-└──────────────┘                                 │  回放/下载  TCP 8004        │
+└──────────────┘                                 │  回放/下载  TCP 8661        │
                                                  └─────────────┬───────────────┘
                                                                │ FFmpeg（只转封装 -c copy）
                                                  ┌─────────────▼───────────────┐
@@ -52,9 +56,9 @@
 
 | 端口 | 用途 | 方向 | 说明 |
 |------|------|------|------|
-| **7660** | CMS 注册服务 | 设备 → 服务端 | `NET_ECMS_StartListen`，设备注册 / 认证 / SessionKey / DAS |
+| **8660** | CMS 注册服务 | 设备 → 服务端 | `NET_ECMS_StartListen`，设备注册 / 认证 / SessionKey / DAS |
 | **8003** | Preview 预览监听 | 设备 → 服务端 | `NET_ESTREAM_StartListenPreview`，实时预览推流 |
-| **8004** | Playback / Download 监听 | 设备 → 服务端 | `NET_ESTREAM_StartListenPlayBack`，回放与下载共用 |
+| **8661** | Playback / Download 监听 | 设备 → 服务端 | `NET_ESTREAM_StartListenPlayBack`，回放与下载共用 |
 | **8080** | HTTP API | ERP → 服务端 | 业务接口 + HLS 播放地址 `/media/**` |
 
 > 监听地址（`listen-ip`）与回传给设备的地址（`public-ip`）**必须分开配置**。
@@ -90,7 +94,8 @@ sudo yum install -y java-21-openjdk-devel
 
 - JDK 21（编译与运行都是 21，`pom.xml` 中 `java.version=21`）
 - Maven 3.6+（构建用，运行只需要 jar 包）
-- 内存建议 ≥ 1GB（每条预览/回放会启一个 ffmpeg 进程）
+- 内存建议 ≥ 2GB（每条预览/回放会启一个 ffmpeg 进程，转码路数多时需相应增加；
+  默认启动参数固定 2GB 堆，内存紧张时用 `JAVA_OPTS` 调小）
 
 ---
 
@@ -107,10 +112,12 @@ sudo yum install -y ffmpeg ffmpeg-devel
 ffmpeg -version
 ```
 
-- 服务只做**封装转换，不转码**（默认 `-c copy`），CPU 占用很低
+- 普通预览/回放默认只做封装转换（`-c copy`），可由各入口的编码参数配置覆盖。
+- 打包录像使用“保存原始 PS → 纯视频 MP4 封装 → 上传”：视频直接复制，输出不含音轨，不复制或转换音频；不再默认整段重编码、逐帧裁切或多轮完整视频解码。必要检查只读取视频包，沿用整行超时、容量、正常下载结束及快照回写保护。此规则适用于后续新生成的成片，已有视频地址不重写，摄像头录音设置不变。
+- 打包成片保留设备返回片段和现有取流余量（请求前 5 秒、后 15/25/35 秒），可能包含相邻打包画面，不保证严格等于业务起止时间。纯视频通过 `-copyts -start_at_zero` 归零时间，排除封装器识别出的损坏包。新对象使用 `packing-segment-v1/`，已有验证通过的 `packing-window-v4/` 地址继续复用。视频编码不变；HEVC 能否播放仍取决于浏览器支持。
 - ISUP 码流为 PS 封装，ffmpeg 以 `-f mpeg` 从 stdin 读取
 - 若 `ffmpeg` 不在 PATH 中，用 `ISUP_FFMPEG_PATH=/usr/local/bin/ffmpeg` 指定，
-  或直接在 `config/application.yml` 里把 `isup.ffmpeg-path` 写成绝对路径
+  或直接在 `application-dev.yml` / `application-prod.yml` 里把 `isup.ffmpeg-path` 写成绝对路径
   （例如 Windows：`C:/Users/15515/ffmpeg/bin/ffmpeg.exe`）
 
 Windows 安装：
@@ -206,7 +213,8 @@ SetSDKInitCfg(0, libcrypto 路径) → SetSDKInitCfg(1, libssl 路径) → Init(
 
 ## 6. application.yml 配置
 
-完整配置（`src/main/resources/application.yml`）：
+配置按 profile 拆分：公共项在 `src/main/resources/application.yml`，环境项在
+`application-dev.yml`（开发）与 `application-prod.yml`（生产）。下面按 dev 的完整配置列出：
 
 ```yaml
 server:
@@ -217,33 +225,43 @@ isup:
   sdk-dir: ${ISUP_SDK_DIR:./sdk}
   public-ip: ${ISUP_PUBLIC_IP:}
   ehome-key: ${ISUP_EHOME_KEY:}
-  api-key: ${ERP_API_KEY:}
-  ffmpeg-path: ${FFMPEG_PATH:ffmpeg}
+  api-key: ${ISUP_API_KEY:}
+  ffmpeg-path: ${ISUP_FFMPEG_PATH:ffmpeg}
   media-dir: ${ISUP_MEDIA_DIR:./data/media}
+  media-url-ttl-seconds: ${ISUP_MEDIA_URL_TTL_SECONDS:7200}
   link-mode: ${ISUP_LINK_MODE:0}
 
   cms:
     listen-ip: ${ISUP_CMS_LISTEN_IP:0.0.0.0}
-    listen-port: ${ISUP_CMS_LISTEN_PORT:7660}
+    listen-port: ${ISUP_CMS_LISTEN_PORT:8660}
 
   stream:
     listen-ip: ${ISUP_STREAM_LISTEN_IP:0.0.0.0}
     preview-port: ${ISUP_PREVIEW_PORT:8003}
-    playback-port: ${ISUP_PLAYBACK_PORT:8004}
+    playback-port: ${ISUP_PLAYBACK_PORT:8661}
 
   ffmpeg:
     ps-input-format: ${ISUP_FFMPEG_PS_INPUT_FORMAT:mpeg}
-    codec-args: ${ISUP_FFMPEG_CODEC_ARGS:-c copy}
+    codec-args: ${ISUP_FFMPEG_CODEC_ARGS:-c:v copy -an}
+    hls-codec-args: ${ISUP_FFMPEG_HLS_CODEC_ARGS:}
+    mp4-codec-args: ${ISUP_FFMPEG_MP4_CODEC_ARGS:-c:v copy -an}
     hls-time: ${ISUP_FFMPEG_HLS_TIME:2}
     hls-list-size: ${ISUP_FFMPEG_HLS_LIST_SIZE:6}
     hls-flags: ${ISUP_FFMPEG_HLS_FLAGS:delete_segments+append_list}
     mp4-args: ${ISUP_FFMPEG_MP4_ARGS:-f mp4 -movflags +frag_keyframe+empty_moov}
+    threads: ${ISUP_FFMPEG_THREADS:0}
     log-level: ${ISUP_FFMPEG_LOG_LEVEL:error}
+    probe-size: ${ISUP_FFMPEG_PROBE_SIZE:1000000}
+    analyze-duration: ${ISUP_FFMPEG_ANALYZE_DURATION:1000000}
+    input-flags: ${ISUP_FFMPEG_INPUT_FLAGS:+genpts+igndts}
+    avoid-negative-ts: ${ISUP_FFMPEG_AVOID_NEGATIVE_TS:make_zero}
 
   session:
     start-timeout-sec: ${ISUP_SESSION_START_TIMEOUT_SEC:30}
     idle-timeout-sec: ${ISUP_SESSION_IDLE_TIMEOUT_SEC:120}
     download-max-sec: ${ISUP_SESSION_DOWNLOAD_MAX_SEC:3600}
+    download-retain-minutes: ${ISUP_SESSION_DOWNLOAD_RETAIN_MINUTES:60}
+    max-active-sessions: ${ISUP_SESSION_MAX_ACTIVE:8}
 ```
 
 ### 配置项说明
@@ -256,13 +274,36 @@ isup:
 | `isup.sdk-dir` | 是 | 海康 SDK 目录 |
 | `isup.ffmpeg-path` | | ffmpeg 路径，默认 `ffmpeg` |
 | `isup.media-dir` | | HLS 切片与 MP4 输出根目录 |
-| `isup.cms.listen-ip/port` | | CMS 本地监听地址与端口，默认 `0.0.0.0:7660` |
+| `isup.cms.listen-ip/port` | | CMS 本地监听地址与端口，默认 `0.0.0.0:8660` |
 | `isup.stream.listen-ip` | | 流媒体本地监听地址，默认 `0.0.0.0` |
 | `isup.stream.preview-port` | | 预览监听端口，默认 `8003` |
-| `isup.stream.playback-port` | | 回放/下载监听端口，默认 `8004` |
+| `isup.stream.playback-port` | | 回放/下载监听端口，默认 `8661` |
 | `isup.link-mode` | | 0-TCP（公网固定用 0）、1-UDP、2-HRUDP |
-| `isup.ffmpeg.codec-args` | | 默认 `-c copy` 不转码；若音频编码不被 MP4 支持可改成 `-c:v copy -c:a aac` |
+| `isup.ffmpeg.codec-args` | | 项目 profile 使用 `-c:v copy -an`：复制视频，不保留或编码音频 |
+| `isup.ffmpeg.hls-codec-args` | | HLS（预览/回放）专用编码参数，留空回退 `codec-args`。浏览器解不了 H.265 时需填 `-c:v libx264 -preset ultrafast -tune zerolatency -force_key_frames expr:gte(t,n_forced*2) -an`。其中 `force_key_frames` 用于强制关键帧间隔：ffmpeg 只在关键帧处切分 ts，设备 GOP 长达数十秒时首个分片会迟迟不出，起播很慢 |
+| `isup.ffmpeg.mp4-codec-args` | | MP4（下载）专用编码参数，留空回退 `codec-args`。MP4 容器支持 HEVC，通常留空即可省下转码 CPU |
+| `isup.ffmpeg.probe-size` / `analyze-duration` | | 输入探测的字节数与时长（微秒）。已指定 `ps-input-format` 时无需大探测，值越大起播越慢 |
+| `isup.ffmpeg.input-flags` | | 解封装标志，默认 `+genpts+igndts`。`igndts` 用于忽略输入 DTS 异常，避免切片时长被算成几十秒 |
+| `isup.ffmpeg.avoid-negative-ts` | | 负时间戳处理，默认 `make_zero`，留空则不设置 |
+| `isup.ffmpeg.threads` | | 传给 ffmpeg 的编码线程数，默认 0（不传，由 ffmpeg 自行决定）。多路并发转码时每路都按核数开线程会过度订阅，设为 1~2 整体吞吐反而更高 |
 | `isup.session.*` | | 各类超时时间（秒） |
+| `isup.session.download-retain-minutes` | | 已完成的下载任务及其 MP4 的保留时长，默认 60 分钟，到期自动清理；填 0 表示不清理 |
+| `isup.session.max-active-sessions` | | 同时存在的会话上限，默认 8。每路会话背后都是一个 ffmpeg 进程，并占用约 8MB 堆（码流队列与缓冲池），H.265→H.264 转码约吃 1 核，建议按 CPU 核数设。超出后新建会话返回 `503 TOO_MANY_SESSIONS` |
+
+### 6.1 数据库（Druid 连接池）
+
+数据源配置（连接池实现 + 连接池参数 + 连接地址/账号）**整套写在同一份 profile 文件里**
+（`application-dev.yml` / `application-prod.yml` 的 `spring.datasource` 下），不拆到公共配置：
+
+| 配置 | 说明 |
+| --- | --- |
+| `spring.datasource.url` | JDBC 地址，默认 `jdbc:mysql://127.0.0.1:3306/isup_db`，可用环境变量 `ISUP_DB_URL` 覆盖 |
+| `spring.datasource.username` / `password` | 数据库账号密码，可用 `ISUP_DB_USERNAME` / `ISUP_DB_PASSWORD` 覆盖 |
+| `spring.datasource.driver-class-name` | 默认 MySQL 驱动 `com.mysql.cj.jdbc.Driver`，换库时用 `DB_DRIVER` 覆盖 |
+| `spring.datasource.druid.initial-size` | 默认 0，启动不建物理连接，数据库暂不可用也不会拖垮启动 |
+
+启动时日志出现 `Init DruidDataSource` + `{dataSource-1} inited` 即表示数据源装配成功。
+换数据库需同步替换 `pom.xml` 里的驱动依赖。
 
 ---
 
@@ -272,9 +313,9 @@ isup:
 
 | 端口 | 协议 | 授权对象 | 用途 |
 |------|------|----------|------|
-| 7660 | TCP | 设备公网 IP 段（或 0.0.0.0/0） | CMS 注册 |
+| 8660 | TCP | 设备公网 IP 段（或 0.0.0.0/0） | CMS 注册 |
 | 8003 | TCP | 设备公网 IP 段（或 0.0.0.0/0） | 实时预览推流 |
-| 8004 | TCP | 设备公网 IP 段（或 0.0.0.0/0） | 回放 / 下载推流 |
+| 8661 | TCP | 设备公网 IP 段（或 0.0.0.0/0） | 回放 / 下载推流 |
 | 8080 | TCP | ERP 服务器 IP（**不要对全网开放**） | HTTP API + HLS 播放 |
 
 同时确认：
@@ -294,7 +335,7 @@ isup:
 | 平台接入方式 | **ISUP（原 EHome）** |
 | 协议版本 | **ISUP 5.0**（务必选 5.0，不要选 4.0） |
 | 服务器地址 | 阿里云**公网 IP** |
-| 端口 | **7660** |
+| 端口 | **8660** |
 | DeviceID | 例如 `GW4206623`（后续 API 调用的 `deviceId`） |
 | 密钥 | 与服务端 `isup.ehome-key` 完全一致 |
 | 启用 | 勾选并保存 |
@@ -304,7 +345,8 @@ isup:
 1. 服务端日志出现 `设备上线：deviceId=..., lUserID=...`
 2. `curl http://<服务器>:8080/api/v1/devices -H "X-API-Key: xxx"` 能看到该设备
 
-设备通道号：模拟通道一般从 `1` 开始；IPC 接入 NVR 后可能是 `33`、`49` 等数字通道，可在录像机"通道管理"里查看。
+设备通道号：模拟通道一般从 `1` 开始；IPC 接入 NVR 后可能是 `33`、`49` 等数字通道。
+以 `GET /api/v1/devices/{deviceId}/channels` 的返回为准（见 9.3），或到录像机"通道管理"里查看。
 
 ---
 
@@ -330,9 +372,9 @@ Content-Type: application/json
   "onlineDevices": 1,
   "activeSessions": 0,
   "publicIp": "47.xxx.xxx.xxx",
-  "cmsPort": 7660,
+  "cmsPort": 8660,
   "previewPort": 8003,
-  "playbackPort": 8004,
+  "playbackPort": 8661,
   "uptimeSeconds": 123
 }
 ```
@@ -355,7 +397,70 @@ Content-Type: application/json
 ]
 ```
 
-### 9.3 实时预览
+### 9.3 查询设备通道
+
+`GET /api/v1/devices/{deviceId}/channels`
+
+一台录像机挂多路摄像头时靠 `channel` 区分每一路，通道号由本接口查询。
+内部走 SDK 的 ISAPI 透传（`NET_ECMS_ISAPIPassThrough`），依次尝试
+`GET /ISAPI/System/Video/inputs/channels`、`GET /ISAPI/ContentMgmt/InputProxy/channels`。
+字幕读写与通用 ISAPI 代理也统一走 ISUP，不回退设备 HTTP；接口详见 [ERP API](docs/erp-api.md)。
+
+```json
+{
+  "serialNumber": "GW4206623",
+  "channels": [
+    {"channelCode": "打包台1", "panoramaChannel": 1, "detailChannel": 2}
+  ]
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| channels[].channelCode | 由设备真实通道名匹配出的工位名 |
+| channels[].panoramaChannel / detailChannel | 全景 / 细节通道号，用于预览、回放和下载 |
+
+两条透传路径均失败时返回 500（`ISUP_ERROR`）。可带 `?probeMinutes=120` 允许降级为录像检索；
+该方式没有真实通道名，因此不合成工位映射，需具体通道号时使用下方 `/channels/detect`：
+
+```bash
+curl -s -H "X-API-Key: $KEY" "$SERVER/api/v1/devices/$DEV/channels?probeMinutes=120" | jq
+```
+
+响应 `message` 保留 SDK 错误码与已尝试的地址；参数错误仍返回 400。
+
+### 9.3.1 通道探测（透传不可用时的兜底）
+
+`POST /api/v1/devices/{deviceId}/channels/detect`
+
+透传未取得通道清单时，可通过 ISUP 文件检索检查 `1..maxChannel` 在指定时间段是否有录像。
+不发起回放、不拉码流、不启动 ffmpeg，也不通过 HTTP 查询名称。
+
+```json
+{
+  "startTime": "2026-09-21 09:53:06",
+  "endTime": "2026-09-21 09:53:21",
+  "maxChannel": 4
+}
+```
+
+响应给出 `availableChannels`（可直接用于下载的 `channel`）和逐通道明细：
+
+```json
+{
+  "deviceId": "DLWH1xx",
+  "availableChannels": [1, 2],
+  "probes": [
+    {"channel": 1, "hasRecording": true, "message": "收到录像数据"},
+    {"channel": 3, "hasRecording": false, "message": "无数据（通道不存在或该时段无录像）"}
+  ]
+}
+```
+
+注意：探测的是**该时段有没有录像**，某通道当时没录也会被判为无数据；
+探测期间会占用回放会话（受 `max-active-sessions` 限制），建议只在核对通道时用。
+
+### 9.4 实时预览
 
 `POST /api/v1/preview`
 
@@ -365,11 +470,11 @@ Content-Type: application/json
 {
   "deviceId": "GW4206623",
   "channel": 1,
-  "streamType": 0
+  "streamType": 1
 }
 ```
 
-- `streamType`：`0` 主码流 / `1` 子码流 / `2` 第三码流（默认 0）
+- `streamType`：`0` 主码流 / `1` 子码流 / `2` 第三码流（默认 1 子码流）
 - `linkMode`：可选，`0` TCP / `1` UDP / `2` HRUDP（默认取全局配置）
 
 响应：
@@ -379,15 +484,15 @@ Content-Type: application/json
   "sessionId": "0f7c8b1e-...",
   "type": "PREVIEW",
   "status": "STARTING",
-  "playUrl": "/media/preview/0f7c8b1e-.../index.m3u8",
+  "playUrl": "/media/1790064000/<signature>/preview/0f7c8b1e-.../index.m3u8",
   "deviceId": "GW4206623",
   "channel": 1
 }
 ```
 
-浏览器直接用 `http://<服务器>:8080/media/preview/{sessionId}/index.m3u8` 播放（可配合 hls.js）。
+浏览器直接使用响应中的 `playUrl` 播放（可配合 hls.js），不要自行拼接地址。地址包含短时效签名，默认 7200 秒；过期后重新查询 `GET /api/v1/sessions/{sessionId}` 获取新地址。
 
-### 9.4 按时间段回放
+### 9.5 按时间段回放
 
 `POST /api/v1/playback`
 
@@ -413,13 +518,13 @@ Content-Type: application/json
   "sessionId": "3a1e...",
   "type": "PLAYBACK",
   "status": "STARTING",
-  "playUrl": "/media/playback/3a1e.../index.m3u8",
+  "playUrl": "/media/1790064000/<signature>/playback/3a1e.../index.m3u8",
   "deviceId": "GW4206623",
   "channel": 1
 }
 ```
 
-### 9.5 按时间段下载录像（异步）
+### 9.6 按时间段下载录像（异步）
 
 `POST /api/v1/download`
 
@@ -460,11 +565,11 @@ Content-Type: application/json
 
 `GET /api/v1/download/{taskId}/file` → 直接返回 MP4（需 `X-API-Key`）
 
-### 9.6 查询会话状态
+### 9.7 查询会话状态
 
 `GET /api/v1/sessions/{sessionId}`
 
-### 9.7 停止会话 / 下载任务
+### 9.8 停止会话 / 下载任务
 
 `DELETE /api/v1/sessions/{sessionId}`
 
@@ -475,7 +580,7 @@ Content-Type: application/json
 停止时会依次释放：`NET_ESTREAM_StopPreview` / `NET_ECMS_StopGetRealStream`（预览）
 或 `NET_ESTREAM_StopPlayBack` / `NET_ECMS_StopPlayBack`（回放下载），然后销毁 ffmpeg 进程并清理临时文件。
 
-### 9.8 查询全部会话
+### 9.9 查询全部会话
 
 `GET /api/v1/sessions`
 
@@ -525,29 +630,32 @@ curl -s $SERVER/api/health | jq
 # 2. 在线设备
 curl -s -H "X-API-Key: $KEY" $SERVER/api/v1/devices | jq
 
-# 3. 实时预览（主码流）
+# 3. 查询设备通道（确定 channel 填几）
+curl -s -H "X-API-Key: $KEY" $SERVER/api/v1/devices/$DEV/channels | jq
+
+# 4. 实时预览（主码流）
 curl -s -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
   -d '{"deviceId":"'"$DEV"'","channel":1,"streamType":0}' \
   $SERVER/api/v1/preview | jq
 
-# 4. 按时间段回放
+# 5. 按时间段回放
 curl -s -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
   -d '{"deviceId":"'"$DEV"'","channel":1,"startTime":"2026-09-19T14:00:00","endTime":"2026-09-19T14:10:00"}' \
   $SERVER/api/v1/playback | jq
 
-# 5. 下载录像（异步）
+# 6. 下载录像（异步）
 TASK=$(curl -s -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
   -d '{"deviceId":"'"$DEV"'","channel":1,"startTime":"2026-09-19 14:00:00","endTime":"2026-09-19 14:10:00"}' \
   $SERVER/api/v1/download | jq -r .taskId)
 echo "taskId=$TASK"
 
-# 6. 轮询下载状态
+# 7. 轮询下载状态
 curl -s -H "X-API-Key: $KEY" $SERVER/api/v1/sessions/$TASK | jq
 
-# 7. 下载 MP4
+# 8. 下载 MP4
 curl -s -H "X-API-Key: $KEY" -o record.mp4 $SERVER/api/v1/download/$TASK/file
 
-# 8. 停止预览 / 回放
+# 9. 停止预览 / 回放
 curl -s -X DELETE -H "X-API-Key: $KEY" $SERVER/api/v1/sessions/$TASK | jq
 ```
 
@@ -555,24 +663,36 @@ curl -s -X DELETE -H "X-API-Key: $KEY" $SERVER/api/v1/sessions/$TASK | jq
 
 ## 11. 本地快速启动
 
-配置统一放在 **`config/application.yml`**（Spring Boot 会自动加载，优先级高于 jar 内配置），
-改配置不需要重新打包。该文件含密钥，已加入 `.gitignore`，模板见 `config/application.example.yml`。
+配置按 profile 分成两套，都在 `src/main/resources/` 下，随 jar 打包：
+
+| 文件 | 用途 | 激活方式 |
+| --- | --- | --- |
+| `application.yml` | 与环境无关的公共配置（端口、默认 profile） | 始终加载 |
+| `application-dev.yml` | 开发 / 本机调试（Windows 路径） | 默认 |
+| `application-prod.yml` | Linux 生产 | `mvn -P prod` 打包 + `isup-server.sh` 启动 |
+
+`isup-server.sh` 按参数切环境（不带参数默认 `prod`），`start.bat` 固定用 `dev`；环境专用值放在 jar 旁 `config/application.yml` 或环境变量中。
+jar 自带对应平台的海康 SDK（`-P dev` 带 win64、`-P prod` 带 linux64），
+启动时释放到 `isup.sdk-dir`，不用手工拷 SDK。
+
+出库包裹录像同步默认每分钟整点触发（`isup.waybill-video.cron: "0 * * * * *"`）。
+上一轮未结束时不会重叠启动；单轮处理仍保留 480 秒预算，避免长录像因调度频率提高而被提前中断。
+空队列会跳过设备通道查询，失败记录沿用冷却、退避、次数和年龄上限。刚完成打包但设备返回视频时长不足时，按首次尝试是否处于录像落盘窗口决定有限重试；不合格成片不会上传，历史已永久隔离的记录不会因升级自动释放。
+若部署目录的外置配置或环境变量 `ISUP_WAYBILL_VIDEO_CRON` 覆盖了该项，需同步修改，重启服务后生效。
 
 ```bash
-# 1. 复制模板（如还没有）
-cp config/application.example.yml config/application.yml
+# 1. 从 config/application.example.yml 复制外置配置到 config/application.yml
+#    填写所在环境的公网地址、接入密钥、API 密钥、FFmpeg、数据库和 OSS 配置。
+#    外置配置不提交 Git；也可以用示例中的 ISUP_* 环境变量提供。
 
-# 2. 改这三个值
-#    isup.public-ip   公网 IP（部署到阿里云时填 ECS 的公网 IP）
-#    isup.ehome-key   与录像机「平台接入」里一致的密钥
-#    isup.api-key     ERP 调用用的 X-API-Key
+# 2. 构建（Linux 生产包要加 -P prod，才会带 linux64 那一套 SDK）
+mvn clean package -DskipTests          # 开发
+mvn -P prod clean package -DskipTests  # 生产
 
-# 3. 构建
-mvn clean package -DskipTests
-
-# 4. 启动
-./start.sh          # Linux / macOS
-start.bat           # Windows
+# 3. 启动
+./isup-server.sh              # Linux / macOS，默认 prod
+./isup-server.sh dev-test     # dev-test 环境
+start.bat                     # Windows
 ```
 
 启动成功的标志：日志出现 `海康 ISUP SDK 加载完成` + `CMS 注册监听成功` + `预览监听成功` + `回放/下载监听成功`。
@@ -631,9 +751,9 @@ mkdir -p /opt/isup-server/data/media /opt/isup-server/logs
 ```bash
 export ISUP_PUBLIC_IP=47.xxx.xxx.xxx      # 阿里云公网 IP（必填）
 export ISUP_EHOME_KEY=xxxxxx              # 与录像机一致的密钥（必填）
-export ERP_API_KEY=xxxxxx                 # ERP 调用密钥（必填）
+export ISUP_API_KEY=xxxxxx                 # ERP 调用密钥（必填）
 export ISUP_SDK_DIR=/opt/isup-server/sdk  # SDK 目录（必填）
-export FFMPEG_PATH=/usr/bin/ffmpeg        # ffmpeg 路径
+export ISUP_FFMPEG_PATH=/usr/bin/ffmpeg        # ffmpeg 路径
 export ISUP_MEDIA_DIR=/opt/isup-server/data/media
 ```
 
@@ -641,8 +761,12 @@ export ISUP_MEDIA_DIR=/opt/isup-server/data/media
 
 ```bash
 cd /opt/isup-server
-java -jar isup-server-1.0.0.jar
+java -Xms2g -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=100 -jar isup-server-1.0.0.jar --spring.profiles.active=prod
 ```
+
+> 固定堆大小可避免运行中动态扩缩，`MaxGCPauseMillis` 给 G1 一个暂停目标：
+> 实时码流下长时间 GC 停顿会造成批量丢帧。内存较小的机器把 `-Xms/-Xmx` 调小即可。
+> `isup-server.sh` / `start.bat` 已内置这组参数，也可用 `JAVA_OPTS` 覆盖。
 
 ### 12.5 systemd 托管（推荐）
 
@@ -659,11 +783,11 @@ User=root
 WorkingDirectory=/opt/isup-server
 Environment="ISUP_PUBLIC_IP=47.xxx.xxx.xxx"
 Environment="ISUP_EHOME_KEY=xxxxxx"
-Environment="ERP_API_KEY=xxxxxx"
+Environment="ISUP_API_KEY=xxxxxx"
 Environment="ISUP_SDK_DIR=/opt/isup-server/sdk"
-Environment="FFMPEG_PATH=/usr/bin/ffmpeg"
+Environment="ISUP_FFMPEG_PATH=/usr/bin/ffmpeg"
 Environment="ISUP_MEDIA_DIR=/opt/isup-server/data/media"
-ExecStart=/usr/bin/java -jar /opt/isup-server/isup-server-1.0.0.jar
+ExecStart=/usr/bin/java -Xms2g -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=100 -jar /opt/isup-server/isup-server-1.0.0.jar --spring.profiles.active=prod
 Restart=on-failure
 RestartSec=10
 StandardOutput=append:/opt/isup-server/logs/stdout.log
@@ -697,7 +821,7 @@ server {
 }
 ```
 
-> 7660 / 8003 / 8004 是设备直连端口，**不能**走 Nginx 反代。
+> 8660 / 8003 / 8661 是设备直连端口，**不能**走 Nginx 反代。
 
 ---
 
@@ -707,10 +831,10 @@ server {
 
 | 现象 | 排查 |
 |------|------|
-| 日志无任何 `设备注册状态回调` | 7660 端口未放行（安全组 / firewalld）；录像机服务器地址填错 |
+| 日志无任何 `设备注册状态回调` | 8660 端口未放行（安全组 / firewalld）；录像机服务器地址填错 |
 | `ISUP 密钥校验失败` | `isup.ehome-key` 与录像机密钥不一致 |
 | `SessionKey 交互异常` | 录像机协议版本不是 ISUP 5.0，改成 5.0 |
-| `NET_ECMS_StartListen 失败` | 7660 被占用：`ss -lntp \| grep 7660` |
+| `NET_ECMS_StartListen 失败` | 8660 被占用：`ss -lntp \| grep 8660` |
 | 设备显示"注册失败/超时" | `public-ip` 填成了 0.0.0.0 / 127.0.0.1，或 NAT 环境未填映射后的公网 IP |
 
 ### 13.2 预览返回 `设备回连超时`
@@ -729,14 +853,14 @@ server {
 
 ### 13.4 回放/下载一直 STARTING
 
-- 8004 端口未放行
+- 8661 端口未放行
 - 该时间段确实没有录像（换一个已知有录像的时间段）
 - 通道号错误
 
 ### 13.5 下载任务 FAILED
 
 - 看日志里 `NET_ECMS_StartPlayBack failed: ... errorCode=xx`
-- MP4 封装不支持设备音频编码时，把 `isup.ffmpeg.codec-args` 改成 `-c:v copy -c:a aac`
+- 项目 profile 使用 `-c:v copy -an`，只封装原视频，不处理音频。
 - 时间跨度过大被拒绝（单次上限 24 小时）
 
 ### 13.6 ffmpeg 报 `Could not find codec parameters` / 一直不出切片
@@ -757,7 +881,7 @@ server {
 | `加载库 ... 错误` | SDK 版本不匹配 / 缺少 `HCAapSDKCom` / 不是 x86_64 |
 | `必须配置 isup.public-ip` | 未设置 `ISUP_PUBLIC_IP` |
 | `isup.public-ip 不能是 0.0.0.0` | 公网地址填了监听地址 |
-| `ffmpeg 不可用` | `FFMPEG_PATH` 不对，媒体功能不可用（接口仍可调用） |
+| `ffmpeg 不可用` | `ISUP_FFMPEG_PATH` 不对，媒体功能不可用（接口仍可调用） |
 
 ### 13.8 日志位置
 
@@ -791,7 +915,8 @@ mvn test -Disup.ffmpeg.it=true -Disup.ffmpeg.it.path=C:/Users/15515/ffmpeg/bin/f
 
 > 真实 ISUP SDK 需要 native library 和真实设备，CI 中不连接设备。
 
-> **注意**：Spring Boot 会自动加载 jar 同级的 `config/application.yml`，其优先级**高于** `src/test/resources/application.yml`。
+> **注意**：`application-dev.yml` 是 profile 配置，优先级**高于** `src/test/resources/application.yml`
+> （若 jar 同级还有 `config/application.yml`，它更高）。
 > 所以 `IsupApiWebTest` 用 `@SpringBootTest(properties = {...})` 内联钉住 `api-key` / `public-ip` 等关键配置，
 > 否则本机那份真实配置会把测试期望值覆盖掉，业务接口用例全部退化成 401。新增集成测试时同理。
 
@@ -836,7 +961,7 @@ http://<服务器>:8080/debug.html
 
 - **hls.js 走 CDN**（jsdelivr）。服务器无外网时，Chrome / Edge 无法播放 m3u8，改用 Safari 或用 `ffplay` 拉 `index.m3u8`
 - 页面在顶部填的 `X-API-Key` 会明文存到浏览器 `localStorage`
-- `/media/**` **不鉴权**（HLS 地址要裸着给播放器），所以这个页面和 8080 端口一样，**只能内网访问**
+- HLS 使用 `/media/{expires}/{signature}/...` 短时效签名地址，不需要额外请求头；旧的裸 `/media/{type}/{sessionId}/...` 地址会被拒绝。签名 URL 仍属于临时凭证，不要写入日志或对外分享
 - HLS 切片要等设备推流后才有，页面已经做了「轮询到 RUNNING 再拉流」，不用手动等 2~5 秒
 
 > 这是联调工具，不是产品页面。生产环境如果不需要，删掉 `src/main/resources/static/debug.html` 即可，不影响任何其他功能。

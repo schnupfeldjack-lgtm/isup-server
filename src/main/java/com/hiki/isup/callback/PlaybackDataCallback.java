@@ -51,19 +51,20 @@ public class PlaybackDataCallback implements HCISUPStream.PLAYBACK_DATA_CB {
                 return true;
             }
 
-            byte[] data = pDataCBInfo.pData.getByteArray(0, pDataCBInfo.dwDataLen);
+            int len = pDataCBInfo.dwDataLen;
             FfmpegProcess ffmpeg = session.getFfmpegProcess();
             if (ffmpeg != null) {
-                ffmpeg.write(data, 0, data.length);
+                // 所有回放/下载都先通过字节预算再复制 native 指针；完整时间轴由原始 PS 离线校验。
+                ffmpeg.write(pDataCBInfo.pData, len);
             }
-            totalBytes += data.length;
-            session.touchData(data.length);
+            totalBytes += len;
+            session.touchData(len);
 
             if (session.getStatus() == SessionStatus.STARTING) {
                 session.setStatus(SessionStatus.RUNNING);
                 log.info("{} 首帧到达：deviceId={}, channel={}, sessionId={}, handle={}, bytes={}",
                         session.getType(), session.getDeviceId(), session.getChannel(),
-                        session.getSessionId(), iPlayBackLinkHandle, data.length);
+                        session.getSessionId(), iPlayBackLinkHandle, len);
             }
         } catch (Exception e) {
             log.error("处理回放码流异常：operation=PlaybackCallback, deviceId={}, channel={}, sessionId={}, handle={}",

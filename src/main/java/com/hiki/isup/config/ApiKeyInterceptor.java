@@ -1,5 +1,7 @@
 package com.hiki.isup.config;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hiki.isup.model.response.ErrorResponse;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
@@ -24,13 +26,19 @@ public class ApiKeyInterceptor implements HandlerInterceptor {
     private static final Logger log = LoggerFactory.getLogger(ApiKeyInterceptor.class);
 
     private final IsupProperties properties;
+    private final ObjectMapper objectMapper;
 
-    public ApiKeyInterceptor(IsupProperties properties) {
+    public ApiKeyInterceptor(IsupProperties properties, ObjectMapper objectMapper) {
         this.properties = properties;
+        this.objectMapper = objectMapper;
     }
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
+        if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
+            return true;
+        }
+
         String expected = properties.getApiKey();
         if (expected == null || expected.isBlank()) {
             log.error("未配置 isup.api-key，拒绝请求：uri={} remoteAddr={}", request.getRequestURI(), request.getRemoteAddr());
@@ -53,11 +61,11 @@ public class ApiKeyInterceptor implements HandlerInterceptor {
         return true;
     }
 
-    private static void writeUnauthorized(HttpServletResponse response, String message) throws Exception {
+    private void writeUnauthorized(HttpServletResponse response, String message) throws Exception {
         response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
         response.setContentType(MediaType.APPLICATION_JSON_VALUE);
         response.setCharacterEncoding(StandardCharsets.UTF_8.name());
-        response.getWriter().write("{\"error\":\"UNAUTHORIZED\",\"message\":\"" + message + "\"}");
+        objectMapper.writeValue(response.getWriter(), new ErrorResponse("UNAUTHORIZED", message));
     }
 
     private static boolean constantTimeEquals(String a, String b) {

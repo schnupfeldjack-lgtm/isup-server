@@ -1,5 +1,8 @@
 # ===== Maven =====
 target/
+target-recording-v3/
+target-recording-v4/
+/target*/
 !.mvn/wrapper/maven-wrapper.jar
 pom.xml.tag
 pom.xml.releaseBackup
@@ -19,6 +22,17 @@ buildNumber.properties
 *.dylib
 /HCAapSDKCom/
 
+# 随 jar 分发的海康 SDK：这一处例外，其它位置的 dll/so 仍然忽略
+!src/main/resources/native/**
+
+# ===== 本地私密配置（示例见 config/application.example.yml） =====
+/config/application.yml
+/config/application-*.yml
+!/config/application.example.yml
+/config/private/
+/.env
+/.env.*
+
 # ===== 运行期数据 =====
 /data/
 /logs/
@@ -26,11 +40,20 @@ buildNumber.properties
 EHomeSDKLog/
 SdkLog/
 
-# ===== 本地真实配置（含密钥，不入库；模板见 config/application.example.yml）=====
-/config/application.yml
-
 # ===== 工作区辅助数据 =====
 /.workbuddy-ai/
+/overlay-followup-work/
+/deployment-upload/
+/downloads/
+/pipe
+/*.mp4
+__pycache__/
+*.pyc
+# 本地现场诊断脚本和证据，不属于发布源码
+/tests/overlay_cycle.py
+/tests/overlay_verify.py
+/docs/diagnostics/
+/docs/recording-ps-timeline-evidence-*.md
 
 # ===== IDE =====
 .idea/

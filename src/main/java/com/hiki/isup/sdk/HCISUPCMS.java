@@ -27,8 +27,19 @@ public interface HCISUPCMS extends Library {
     /** SDK 初始化配置类型：0-libcrypto 路径，1-libssl 路径 */
     int SDK_INIT_CFG_CRYPTO = 0;
     int SDK_INIT_CFG_SSL = 1;
-    /** 本地配置类型：5-HCAapSDKCom 组件库目录 */
+    /** 本地配置类型（与海康公开头文件 NET_ECMS_LOCAL_CFG_TYPE_* 对齐）：
+     *  5-组件库目录；7-心跳间隔秒；8-心跳超时次数；9-CMS 访问安全；
+     *  10-告警访问安全；11-码流访问安全；12-告警与图片分离；
+     *  13-告警服务器类型；14-图片服务器类型。 */
     int SDK_LOCAL_CFG_COMPONENT_DIR = 5;
+    int SDK_LOCAL_CFG_KEEPALIVE_SECONDS = 7;
+    int SDK_LOCAL_CFG_KEEPALIVE_COUNT = 8;
+    int SDK_LOCAL_CFG_CMS_ACCESS_SECURITY = 9;
+    int SDK_LOCAL_CFG_ALARM_ACCESS_SECURITY = 10;
+    int SDK_LOCAL_CFG_STREAM_ACCESS_SECURITY = 11;
+    int SDK_LOCAL_CFG_ALARM_PICTURE_SEPARATE = 12;
+    int SDK_LOCAL_CFG_ALARM_SERVER_TYPE = 13;
+    int SDK_LOCAL_CFG_PICTURE_SERVER_TYPE = 14;
 
     /** 设备注册回调类型 */
     interface EHOME_REGISTER_TYPE {
@@ -223,6 +234,27 @@ public interface HCISUPCMS extends Library {
         public byte[] byRes = new byte[124];
     }
 
+    /**
+     * ISAPI / XML 透传参数（{@code NET_ECMS_ISAPIPassThrough} 等共用）。
+     *
+     * <p>字段顺序对照海康头文件 {@code tagNET_EHOME_PTXML_PARAM}：
+     * 请求 URL、条件缓冲、输入缓冲、输出缓冲、实际返回长度、接收超时、句柄、保留。</p>
+     */
+    class NET_EHOME_PTXML_PARAM extends HikSdkStructure {
+        public Pointer pRequestUrl;
+        public int dwRequestUrlLen;
+        public Pointer pCondBuffer;
+        public int dwCondSize;
+        public Pointer pInBuffer;
+        public int dwInSize;
+        public Pointer pOutBuffer;
+        public int dwOutSize;
+        public int dwReturnedXMLLen;
+        public int dwRecvTimeOut;
+        public int dwHandle;
+        public byte[] byRes = new byte[24];
+    }
+
     /** 用于向 SDK 传递字符串路径（crypto / ssl / 组件库目录） */
     class BYTE_ARRAY extends HikSdkStructure {
         public byte[] byValue;
@@ -281,4 +313,74 @@ public interface HCISUPCMS extends Library {
                                        NET_EHOME_PUSHPLAYBACK_OUT struPushPlayBackOut);
 
     boolean NET_ECMS_StopPlayBack(int lUserID, int lSessionID);
+
+    /**
+     * ISAPI 透传：向已注册设备发送一条 ISAPI 请求，响应 XML 写回 {@code pOutBuffer}。
+     *
+     * <p>通道列表等 ISAPI 能力都走这个函数；设备不响应时返回 false，错误码取
+     * {@code NET_ECMS_GetLastError()}。</p>
+     */
+    boolean NET_ECMS_ISAPIPassThrough(int lUserID, NET_EHOME_PTXML_PARAM lpParam);
+
+    // ---- 录像文件检索（不拉流） ----
+
+    /** 查找录像文件 */
+    int ENUM_SEARCH_RECORD_FILE = 0;
+    /** 录像类型：全部 */
+    int REC_TYPE_ALL = 0xff;
+    int MAX_FILE_NAME_LEN = 100;
+
+    /**
+     * {@code NET_ECMS_FindNextFile_V11} 返回值。
+     * 1000 成功读到一条，1001 没有，1002 需等待，1003 取完，1004 异常，1005 不支持。
+     */
+    int ENUM_GET_NEXT_STATUS_SUCCESS = 1000;
+    int ENUM_GET_NEXT_STATUS_NOFIND = 1001;
+    int ENUM_GET_NEXT_STATUS_NEEDWAIT = 1002;
+    int ENUM_GET_NEXT_STATUS_FINISH = 1003;
+    int ENUM_GET_NEXT_STATUS_EXCEPTION = 1004;
+    int ENUM_GET_NEXT_STATUS_NOTSUPPORT = 1005;
+
+    /**
+     * 录像检索条件，字段顺序对照 {@code tagNET_EHOME_REC_FILE_COND}。
+     */
+    class NET_EHOME_REC_FILE_COND extends HikSdkStructure {
+        public int dwChannel;
+        public int dwRecType;
+        public NET_EHOME_TIME struStartTime = new NET_EHOME_TIME();
+        public NET_EHOME_TIME struStopTime = new NET_EHOME_TIME();
+        public int dwStartIndex;
+        public int dwMaxFileCountPer;
+        public byte byLocalOrUTC;
+        public byte[] byRes = new byte[63];
+    }
+
+    /**
+     * 一条录像文件，字段顺序对照 {@code tagNET_EHOME_REC_FILE}。
+     */
+    class NET_EHOME_REC_FILE extends HikSdkStructure {
+        public int dwSize;
+        public byte[] sFileName = new byte[MAX_FILE_NAME_LEN];
+        public NET_EHOME_TIME struStartTime = new NET_EHOME_TIME();
+        public NET_EHOME_TIME struStopTime = new NET_EHOME_TIME();
+        public int dwFileSize;
+        public int dwFileMainType;
+        public int dwFileSubType;
+        public int dwFileIndex;
+        public byte byTimeDiffH;
+        public byte byTimeDiffM;
+        public byte[] byRes = new byte[126];
+    }
+
+    /**
+     * 开始查找录像。成功返回查找句柄（≥0），失败返回负数。
+     *
+     * @param lSearchType 0 录像，1 图片
+     */
+    int NET_ECMS_StartFindFile_V11(int lUserID, int lSearchType, NET_EHOME_REC_FILE_COND pFindCond, int dwCondSize);
+
+    /** 取下一条录像。返回值见 {@code ENUM_GET_NEXT_STATUS_*} */
+    int NET_ECMS_FindNextFile_V11(int lHandle, NET_EHOME_REC_FILE pFindData, int dwDataSize);
+
+    boolean NET_ECMS_StopFindFile(int lHandle);
 }

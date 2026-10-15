@@ -1,6 +1,6 @@
 import {
-  ApiClient, STATUS_LABELS, TYPE_LABELS, downloadFilename, formatBytes,
-  formatLocalDate, isActive, normalizeBase, readConfig, resolveMediaUrl, toApiDateTime, writeConfig,
+  ApiClient, STATUS_LABELS, TYPE_LABELS, describeApiDateTime, downloadFilename, formatBytes,
+  formatLocalDate, isActive, normalizeBase, readConfig, resolveMediaUrl, toApiDateTime, validateTimeRange, writeConfig,
 } from './console-utils.js';
 
 const $ = id => document.getElementById(id);
@@ -317,9 +317,21 @@ function readParameters(prefix) {
       try { body[`${name}Time`] = toApiDateTime($(`${prefix}-${name}`).value); }
       catch (error) { invalid(`${prefix}-${name}`, `${name === 'start' ? '开始' : '结束'}时间：${error.message}`); }
     }
-    if (body.endTime <= body.startTime) invalid(`${prefix}-end`, '结束时间必须晚于开始时间');
+    try { Object.assign(body, validateTimeRange($(`${prefix}-start`).value, $(`${prefix}-end`).value)); }
+    catch (error) { invalid(`${prefix}-end`, error.message); }
   }
   return body;
+}
+
+function updateTimeHint(input) {
+  const output = $(`${input.id}-normalized`);
+  if (!output) return;
+  try { output.textContent = describeApiDateTime(input.value); }
+  catch { output.textContent = '实际提交：时间尚未填写完整（24 小时制）'; }
+}
+
+function updateRangeHints(prefix) {
+  ['start', 'end'].forEach(name => updateTimeHint($(`${prefix}-${name}`)));
 }
 
 function fillRange(prefix, minutes) {
@@ -327,6 +339,7 @@ function fillRange(prefix, minutes) {
   $(`${prefix}-start`).value = formatLocalDate(new Date(end.getTime() - minutes * 60000));
   $(`${prefix}-end`).value = formatLocalDate(end);
   ['start', 'end'].forEach(name => $(`${prefix}-${name}`).removeAttribute('aria-invalid'));
+  updateRangeHints(prefix);
 }
 
 function showPlaceholder(title, hint) {
@@ -374,6 +387,7 @@ async function startMedia(type) {
   const version = state.version;
   try {
     if (state.player) {
+      clearMedia();
       await state.client.request(`/api/v1/sessions/${encodeURIComponent(state.player.sessionId)}`, { method: 'DELETE' });
       resetPlayer();
     }
@@ -423,6 +437,44 @@ function loadHls() {
   return hlsLoader;
 }
 
+/**
+ * 等 HLS 的 index.m3u8 真正出现再交给播放器。
+ *
+ * 服务端 ffmpeg 启动后要先跨过 probesize、再等到第一个关键帧才切出第一片，
+ * 实测起步要 30~60 秒。会话一 RUNNING 就 loadSource 的话，
+ * hls.js 会按 errorRetry 在这段时间里反复请求，控制台刷满 404，
+ * 看着像故障其实只是还没出片。所以这里先轻量探测，就绪了再加载。
+ */
+async function waitForManifest(url, stillCurrent, session) {
+  const deadline = Date.now() + 120000;
+  let waited = 0;
+  while (Date.now() < deadline) {
+    if (!stillCurrent()) return 'aborted';
+    // 会话已经结束了就别再等：停止/失败时服务端的媒体目录会被清理，
+    // 再等下去只是一场没完没了的 404（用户点了停止后最容易撞上）
+    if (session && ['STOPPED', 'FAILED', 'COMPLETED'].includes(session.status)) return 'stopped';
+    try {
+      // 用 GET 而非 HEAD：m3u8 只有几百字节，代价可忽略，
+      // 但能绕开「服务端 CORS 未放行 HEAD」导致的 403（跨域时很常见）
+      const res = await fetch(url, { method: 'GET', cache: 'no-store', signal: AbortSignal.timeout(5000) });
+      if (res.ok) {
+        // 光有 m3u8 文件还不够：ffmpeg 刚建文件时可能只有 #EXTM3U 头、还没写入任何分片，
+        // 这时交给 hls.js 会直接报 manifest 错误，前面就白等了。
+        // 必须等到清单里真的出现 .ts 条目才算就绪。
+        const text = await res.text();
+        if (/\.ts(\?|$)/m.test(text)) return 'ready';
+      } else if (res.status !== 404) {
+        return 'ready'; // 非 404 的其它状态码交给播放器自己报错，别在这儿死等
+      }
+    } catch { /* 还没就绪或网络抖动，继续等 */ }
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    waited += 3;
+    if (!stillCurrent()) return 'aborted';
+    showPlaceholder('等待切片生成', `HLS 出片通常需要 30~60 秒，已等待 ${waited} 秒…`);
+  }
+  return 'timeout';
+}
+
 async function attachPlayer() {
   const session = state.player;
   if (!session || !['RUNNING', 'COMPLETED'].includes(session.status)) return;
@@ -441,6 +493,18 @@ async function attachPlayer() {
     $('play-meta').textContent = `${session.deviceId} · 通道 ${session.channel}`;
     $('play-meta').title = redact(url);
     log(`加载视频流：${url}`);
+    const ready = await waitForManifest(url, stillCurrent, session);
+    if (ready === 'aborted') return;
+    if (ready === 'stopped') {
+      showPlaceholder('会话已结束', '该预览/回放已停止，切片目录随之清理，等下去也不会再有 m3u8。请重新发起预览。');
+      log(`会话已结束，停止等待切片：${session.status}`, 'warn');
+      return;
+    }
+    if (ready === 'timeout') {
+      showPlaceholder('切片迟迟未生成', '超过 120 秒仍没有 m3u8。请确认设备真的在推流（看会话的接收字节数是否增长），并查服务端日志。');
+      log(`等待 HLS 切片超时：${url}`, 'error');
+      return;
+    }
     if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = url;
       startVideo();
@@ -456,10 +520,27 @@ async function attachPlayer() {
       state.hls = hls;
       hls.on(Hls.Events.MANIFEST_PARSED, startVideo);
       hls.on(Hls.Events.ERROR, (_event, data) => {
-        if (stillCurrent() && data?.fatal) {
+        if (!stillCurrent() || !data?.fatal) return;
+        const detail = data.details || '';
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          // m3u8 取不到：会话多半已失效（服务重启过、或会话被清理），重试没意义
+          showPlaceholder('播放地址已失效', '取不到 m3u8（' + detail + '）。该会话可能已被清理或服务重启过，请重新发起预览/回放。');
+          log(`HLS 网络错误：${detail}。会话可能已失效，请重新发起预览。`, 'error');
+        } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          // 解不了：最常见是码流为 H.265/HEVC，浏览器 MSE 不支持
+          showPlaceholder('浏览器无法解码该视频', '码流很可能是 H.265/HEVC，浏览器解不了。请确认服务端 hls-codec-args 已转成 H.264，或在设备端把码流改为 H.264。');
+          log(`HLS 解码错误：${detail}。疑似 HEVC 码流，浏览器不支持。`, 'error');
+        } else {
           showPlaceholder('视频流加载失败', '可尝试重载流；仍失败时请检查设备推流和服务端日志。');
-          log(`HLS 错误：${data.type} / ${data.details}`, 'error');
+          log(`HLS 错误：${data.type} / ${detail}`, 'error');
         }
+        // fatal 之后必须销毁，否则 hls.js 会继续按 errorRetry 刷请求，控制台满屏 404
+        hls.destroy();
+        if (state.hls === hls) state.hls = null;
+        // 注意：这里不能把 session.attached 置回 false。
+        // 轮询里 `status RUNNING && !attached` 会自动重连，一旦这里置 false，
+        // 就会变成「fatal → 自动重连 → 再 fatal」的死循环，比刷 404 还糟。
+        // 想重试请点「重载流」，那个入口不走 attached 判断。
       });
       hls.loadSource(url);
       hls.attachMedia(video);
@@ -477,6 +558,7 @@ async function stopCurrentPlayer() {
   state.mutations++;
   updatePlayerButtons();
   try {
+    clearMedia();
     await state.client.request(`/api/v1/sessions/${encodeURIComponent(state.player.sessionId)}`, { method: 'DELETE' });
     resetPlayer();
     await refreshSessions();
@@ -504,6 +586,55 @@ async function startDownload() {
     $('download-submit').disabled = Boolean(state.download && isActive(state.download.status));
     schedulePolling();
   }
+}
+
+/**
+ * 列出设备通道供点选：先取设备通道清单（带真实通道名），
+ * 取不到再按当前时间段逐通道探测哪些通道有录像。
+ */
+async function detectChannels() {
+  if (!requireKey()) return;
+  const button = $('channel-probe');
+  const output = $('channel-probe-result');
+  let body;
+  try { body = readParameters('dl'); } catch (error) { report(error); return; }
+  const deviceId = encodeURIComponent(body.deviceId);
+  button.disabled = true;
+  output.textContent = '正在查询通道…';
+  try {
+    let chips = [];
+    try {
+      const list = await state.client.request(`/api/v1/devices/${deviceId}/channels`, { timeout: 30000 });
+      chips = (list?.channels || []).map(item => ({
+        channel: item.channel,
+        label: item.name ? `通道 ${item.channel} · ${item.name}` : `通道 ${item.channel}`
+      }));
+    } catch { /* 拿不到清单就走探测 */ }
+    if (!chips.length) {
+      output.textContent = '通道清单取不到，正在逐通道探测，请稍候…';
+      const response = await state.client.request(
+        `/api/v1/devices/${deviceId}/channels/detect`,
+        { method: 'POST', body: { startTime: body.startTime, endTime: body.endTime, maxChannel: 8 }, timeout: 180000 });
+      chips = (response?.availableChannels || []).map(channel => ({ channel, label: `通道 ${channel}` }));
+    }
+    output.textContent = '';
+    if (!chips.length) {
+      output.textContent = '没有查到通道，也没有探测到该时段有录像的通道，换一段确定有录像的时间再试。';
+      return;
+    }
+    for (const chip of chips) {
+      const element = node('button');
+      element.type = 'button';
+      element.textContent = chip.label;
+      element.addEventListener('click', () => {
+        $('dl-channel').value = chip.channel;
+        notify(`已填入通道 ${chip.channel}`, 'success');
+      });
+      output.append(element);
+    }
+    notify(`已列出 ${chips.length} 个通道`, 'success');
+  } catch (error) { report(error); output.textContent = '查询通道失败，请看提示与服务端日志。'; }
+  finally { button.disabled = false; }
 }
 
 function renderDownload() {
@@ -740,12 +871,16 @@ document.addEventListener('click', event => {
   const action = actions[button.dataset.action];
   if (action) Promise.resolve().then(() => action(button)).catch(report);
 });
-document.addEventListener('input', event => event.target.removeAttribute('aria-invalid'));
+document.addEventListener('input', event => {
+  event.target.removeAttribute('aria-invalid');
+  if (/^(pb|dl)-(start|end)$/.test(event.target.id)) updateTimeHint(event.target);
+});
 document.addEventListener('keydown', event => { if (event.key === 'Escape') closeMenu(); });
 $('settings-form').addEventListener('submit', saveSettings);
 $('preview-form').addEventListener('submit', event => { event.preventDefault(); void startMedia('PREVIEW'); });
 $('playback-form').addEventListener('submit', event => { event.preventDefault(); void startMedia('PLAYBACK'); });
 $('download-form').addEventListener('submit', event => { event.preventDefault(); void startDownload(); });
+$('channel-probe').addEventListener('click', () => void detectChannels());
 $('device-search').addEventListener('input', renderDevices);
 $('log-level').addEventListener('change', renderLogs);
 $('session-filter').addEventListener('submit', event => {

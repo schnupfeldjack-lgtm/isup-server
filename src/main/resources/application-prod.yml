@@ -1,0 +1,177 @@
+# ============================================================
+# 生产环境（Linux，由 pom 的 -P prod 构建时激活）
+# ============================================================
+
+isup:
+  # 是否初始化海康 SDK 并开启 8660/8003/8661 监听
+  enabled: true
+
+  # SDK 释放目录：jar 里已带 linux64 那一套，启动时自动释放到这里，不用手工放文件
+  sdk-dir: /app/isup/sdk
+
+  # 设备回连地址：生产 ECS 的公网 IP，不能是 0.0.0.0 / 127.0.0.1
+  public-ip: ${ISUP_PUBLIC_IP:}
+
+  # ISUP 5.0 接入密钥：与设备「平台接入」里配置的一致
+  ehome-key: ${ISUP_EHOME_KEY:}
+
+  # ERP 调用 HTTP API 的密钥（请求头 X-API-Key），生产环境建议换成独立的值
+  api-key: ${ISUP_API_KEY:}
+
+  # Linux 上 ffmpeg 的实际位置（which ffmpeg 查得到）
+  ffmpeg-path: ${ISUP_FFMPEG_PATH:/usr/local/bin/ffmpeg}
+
+  # HLS 切片与下载 MP4 的输出目录，需要可写且留足磁盘
+  media-dir: /app/isup/data/media
+
+  # 取流链路：0-TCP（公网固定用 0）
+  link-mode: 0
+
+  # 掉线宽限期（秒）：收到下线回调后先保留条目，超时未重连才移出列表并停会话
+  device-offline-grace-sec: 20
+
+  # 告警、图片服务器信息的总开关；关闭时仍回传结构体大小和注册保活参数。
+  # 开启后再由 alarm-server-enabled、picture-server-enabled 分别控制。
+  server-info-enabled: false
+
+  # 旧设备 HTTP 认证配置，仅保留兼容绑定。
+  # 字幕、通道查询、通用 ISAPI 均只走 ISUP，不读取以下凭据；timeout-ms 保留为兼容默认值。
+  # 设备登录凭据通过外置配置或环境变量提供。
+  # 需要时可用环境变量 ISUP_DEVICE_PWD 覆盖。
+  device-auth:
+    username: ${ISUP_DEVICE_USERNAME:admin}
+    password: ${ISUP_DEVICE_PWD:}
+    timeout-ms: 5000
+
+  cms:
+    listen-ip: 0.0.0.0
+    listen-port: 8660
+
+  stream:
+    listen-ip: 0.0.0.0
+    # 配置保留。8003 监听代码在 IsupService.start() 里暂时注释，恢复预览时打开那处即可
+    preview-listen-enabled: true
+    preview-port: 8003
+    playback-port: ${ISUP_PLAYBACK_PORT:8661}
+
+  ffmpeg:
+    # 输入封装：海康 ISUP 推的是 PS 流（MPEG-PS）
+    ps-input-format: mpeg
+
+    # 解封装探测：读多少字节 / 多少微秒后才认出音视轨。这两个值直接决定起播延迟。
+    # 已通过 ps-input-format 指定输入封装，无需大范围探测；低码率子码流（约 240kbps）
+    # 填满 1MB 探测缓冲本身就要三十多秒，起播会被拖慢，故按低码率下调。
+    # 若某些设备探不出音轨，再逐步调大这两个值。
+    probe-size: 200000
+    analyze-duration: 200000
+
+    # 解封装标志：genpts 为缺 PTS 的 PS 流补时间戳；igndts 忽略输入 DTS 异常，
+    # 否则切片时长会被算成几十秒（表现为 HLS 列表里 EXTINF 巨大）
+    input-flags: +genpts+igndts
+
+    # 负时间戳处理策略，留空则不向 ffmpeg 传该参数
+    avoid-negative-ts: make_zero
+
+    # 通用编码参数：原视频直接复制，不保留或编码音频。
+    codec-args: -c:v copy -an
+
+    # 实时预览已关闭（不监听 8003），不再为 HLS 转 H.264。
+    # 回放 HLS 回退到上面的 codec-args（视频 copy）。恢复预览且浏览器要播 H.265 时再打开下一行。
+    # hls-codec-args: -c:v libx264 -preset ultrafast -tune zerolatency -force_key_frames expr:gte(t,n_forced*2) -an
+
+    # MP4（录像下载）专用：MP4 容器支持 HEVC，下载不必转视频，省 CPU
+    mp4-codec-args: -c:v copy -an
+
+    # MP4 容器参数（编码参数由上面 mp4-codec-args 提供，这里不要重复写 -c）
+    mp4-args: -f mp4 -movflags +frag_keyframe+empty_moov
+
+    # 编码线程数（-threads）：0 = 不传该参数，由 ffmpeg 自行决定。
+    # 多路并发转码时每路都按核数开线程会过度订阅，此时设为 1~2 整体吞吐反而更高
+    threads: 1
+
+    hls-time: 2
+    hls-list-size: 6
+    hls-flags: delete_segments+append_list
+    log-level: error
+
+  session:
+    # 发起预览/回放后等待设备推流的最长时间（秒），超时判 FAILED
+    start-timeout-sec: 30
+    # 运行中的会话无码流数据超过该时长则判 FAILED（秒）
+    idle-timeout-sec: 120
+    download-max-sec: 3600
+    # 已完成的下载任务与 MP4 文件保留时长（分钟），0 = 不清理
+    download-retain-minutes: 60
+    # 同时存在的预览/回放/下载会话上限，0 = 不限制。
+    # 码流包预算单路 32MiB、全局 128MiB，另有受限复用池；不是 JVM 总内存上限。
+    # H.265→H.264 转码一路约吃 1 核，按核数设：4 核 4~6，8 核 8~12。
+    # 超出后新建会话直接返回 503 TOO_MANY_SESSIONS。
+    max-active-sessions: 8
+
+  # 出库包裹录像：按在线设备和 channel_code 匹配全景/细节再上传 OSS
+  waybill-video:
+    enabled: true
+    # 每分钟整点触发；上一轮未结束时不重叠启动
+    cron: "0 * * * * *"
+    channels: [1, 2]
+    batch-size: 5
+    download-concurrency: 4
+    # PROCESSING 超过该分钟数视为进程挂了，改回 PENDING。
+    # 取值需大于 isup.session.download-max-sec，避免下载还在跑就被回收。
+    stale-processing-minutes: 70
+    # FAILED 按最久未尝试顺序分页检查；仅恢复耐久台账允许的记录。0 = 不重试。
+    failed-retry-after-minutes: 30
+    retry-max-attempts: 3
+    retry-max-backoff-minutes: 360
+    retry-max-age-days: 7
+    retry-max-entries: 10000
+    # 只在录制结束后 10 分钟内，将连续录像的纯缺尾视作可重试；不会上传缺尾成片。
+    recording-tail-retry-window-seconds: 600
+    # 每条记录共用预算，覆盖启动、下载、排队、裁切与上传。
+    row-timeout-seconds: 600
+    query-timeout-seconds: 5
+    # 单轮领取预算：到期后停止领取新记录，已领取记录继续完成；<= 0 表示不限制
+    max-run-seconds: 480
+
+  oss:
+    endpoint: ${ISUP_OSS_ENDPOINT:}
+    static-domain: ${ISUP_OSS_STATIC_DOMAIN:}
+    bucket: ${ISUP_OSS_BUCKET:}
+    access-key-id: ${ISUP_OSS_ACCESS_KEY_ID:}
+    access-key-secret: ${ISUP_OSS_ACCESS_KEY_SECRET:}
+    prefix: waybill-video/
+
+spring:
+  datasource:
+    type: com.alibaba.druid.pool.DruidDataSource
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    # 正式库（RDS）。开发/测试库见 application-dev.yml / application-dev-test.yml
+    url: ${ISUP_DB_URL:jdbc:mysql://127.0.0.1:3306/isup_db?useUnicode=true&characterEncoding=UTF-8&useSSL=false&serverTimezone=Asia/Shanghai&connectTimeout=5000&socketTimeout=15000}
+    username: ${ISUP_DB_USERNAME:}
+    password: ${ISUP_DB_PASSWORD:}
+    druid:
+      initial-size: 1
+      min-idle: 1
+      max-active: 20
+      max-wait: 60000
+      test-while-idle: true
+      test-on-borrow: false
+      validation-query: SELECT 1
+      time-between-eviction-runs-millis: 60000
+      min-evictable-idle-time-millis: 300000
+
+logging:
+  # 应用日志落盘路径（logs/EHomeSDKLog/ 下的是海康 SDK 自己的日志，不是本应用的）
+  file:
+    name: /app/isup/logs/isup-server.log
+  logback:
+    rollingpolicy:
+      # 历史日志保留为可直接查看的文本，不启用归档压缩。
+      file-name-pattern: /app/isup/logs/archive/isup-server.%d{yyyy-MM-dd, Asia/Shanghai}.%i.log
+      max-file-size: 100MB
+      max-history: 30
+      total-size-cap: 3GB
+      clean-history-on-start: true
+  level:
+    root: INFO
+    com.hiki.isup: INFO

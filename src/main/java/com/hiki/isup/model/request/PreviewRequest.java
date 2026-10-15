@@ -18,9 +18,9 @@ public class PreviewRequest {
     @Min(value = 1, message = "channel 必须大于等于 1")
     private Integer channel;
 
-    /** 码流类型：0-主码流，1-子码流，2-第三码流 */
+    /** 码流类型：0-主码流，1-子码流，2-第三码流；未传时默认子码流 */
     @Min(value = 0, message = "streamType 取值必须是 0/1/2")
-    private Integer streamType = 0;
+    private Integer streamType = 1;
 
     /** 链路模式：0-TCP，1-UDP，2-HRUDP；不传则使用全局配置 isup.link-mode */
     private Integer linkMode;

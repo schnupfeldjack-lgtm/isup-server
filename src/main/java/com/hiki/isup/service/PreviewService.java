@@ -3,6 +3,7 @@ package com.hiki.isup.service;
 import com.hiki.isup.config.IsupProperties;
 import com.hiki.isup.exception.BadRequestException;
 import com.hiki.isup.exception.IsupException;
+import com.hiki.isup.model.DeviceInfo;
 import com.hiki.isup.model.MediaSession;
 import com.hiki.isup.model.SessionStatus;
 import com.hiki.isup.model.SessionType;
@@ -19,7 +20,7 @@ import java.nio.file.Path;
 import static com.hiki.isup.sdk.NativeSdkLoader.copyTo;
 
 /**
- * 实时预览：ERP -&gt; StartGetRealStreamV11 -&gt; StartPushRealStream -&gt; 设备回连 8003 -&gt; FFmpeg -&gt; HLS。
+ * 实时预览：ERP -&gt; StartGetRealStreamV11 -&gt; FFmpeg -&gt; StartPushRealStream -&gt; 设备回连 8003 -&gt; HLS。
  */
 @Service
 public class PreviewService {
@@ -47,23 +48,26 @@ public class PreviewService {
     public StreamSessionResponse startPreview(PreviewRequest request) {
         String deviceId = request.getDeviceId().trim();
         int channel = request.getChannel();
-        int streamType = request.getStreamType() == null ? 0 : request.getStreamType();
+        int streamType = request.getStreamType() == null ? 1 : request.getStreamType();
         if (streamType < 0 || streamType > 2) {
             throw new BadRequestException("streamType 取值必须是 0（主码流）/1（子码流）/2（第三码流），实际值：" + streamType);
         }
         int linkMode = request.getLinkMode() == null ? properties.getLinkMode() : request.getLinkMode();
 
-        isupService.requireReady("NET_ECMS_StartGetRealStreamV11");
-        int lUserId = deviceRegistry.requireLUserId(deviceId, "预览");
+        isupService.requirePreviewListen("NET_ECMS_StartGetRealStreamV11");
+        DeviceInfo connection = deviceRegistry.requireConnection(deviceId, "预览");
+        int lUserId = connection.getLUserId();
 
-        MediaSession session = sessionManager.create(SessionType.PREVIEW, deviceId, channel);
-        session.setLUserId(lUserId);
-
-        Path dir = MediaPaths.previewDir(properties.getMediaDir(), session.getSessionId());
+        MediaSession session = sessionManager.create(SessionType.PREVIEW, connection, channel);
+        if (!session.tryBeginNativeOperation()) {
+            throw new IllegalStateException("预览会话已取消，不能继续启动");
+        }
         try {
+            session.setLUserId(lUserId);
+
+            Path dir = MediaPaths.previewDir(properties.getMediaDir(), session.getSessionId());
             session.setOutputDir(dir.toString());
             session.setPlayUrl("/media/preview/" + session.getSessionId() + "/index.m3u8");
-            session.setFfmpegProcess(ffmpegService.startHls(properties, dir, session.getSessionId()));
 
             HCISUPCMS cms = isupService.cms();
 
@@ -85,8 +89,12 @@ public class PreviewService {
             previewOut.read();
             int isupSessionId = previewOut.lSessionID;
             sessionManager.registerIsupSession(session, isupSessionId);
+            checkStarting(session);
             log.info("NET_ECMS_StartGetRealStreamV11 成功：deviceId={}, channel={}, streamType={}, sessionId={}, isupSessionId={}",
                     deviceId, channel, streamType, session.getSessionId(), isupSessionId);
+
+            session.setFfmpegProcess(ffmpegService.startHls(properties, dir, session.getSessionId()));
+            checkStarting(session);
 
             HCISUPCMS.NET_EHOME_PUSHSTREAM_IN pushIn = new HCISUPCMS.NET_EHOME_PUSHSTREAM_IN();
             pushIn.read();
@@ -103,6 +111,7 @@ public class PreviewService {
                 throw IsupException.sdkFailed("NET_ECMS_StartPushRealStream", deviceId, channel,
                         session.getSessionId(), cms.NET_ECMS_GetLastError());
             }
+            checkStarting(session);
             log.info("NET_ECMS_StartPushRealStream 成功：deviceId={}, channel={}, sessionId={}, isupSessionId={}",
                     deviceId, channel, session.getSessionId(), isupSessionId);
 
@@ -117,6 +126,14 @@ public class PreviewService {
         } catch (Exception e) {
             sessionManager.stop(session, SessionStatus.FAILED, e.getMessage());
             throw IsupException.wrap("启动实时预览", deviceId, channel, session.getSessionId(), e);
+        } finally {
+            sessionManager.endNativeOperation(session);
+        }
+    }
+
+    private static void checkStarting(MediaSession session) {
+        if (session.isStopping() || session.isFinished()) {
+            throw new IllegalStateException("预览会话已取消，不能继续启动");
         }
     }
 }

@@ -1,11 +1,18 @@
 package com.hiki.isup.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+
 import java.time.LocalDateTime;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 在线设备信息（仅保存在内存，不入库）。
  */
 public class DeviceInfo {
+
+    private static final AtomicLong NEXT_CONNECTION_GENERATION = new AtomicLong();
+    /** 每次注册使用新代次，即使 SDK 复用了同一数值句柄；仅用于进程内清理边界。 */
+    private final long connectionGeneration = NEXT_CONNECTION_GENERATION.incrementAndGet();
 
     /** 设备 ID，即录像机上配置的 DeviceID */
     private String deviceId;
@@ -15,6 +22,8 @@ public class DeviceInfo {
     private String deviceIp;
     private boolean online;
     private LocalDateTime onlineTime;
+    /** 最近一次掉线时间（在线时为 null；宽限期内条目已置 online=false 但仍在注册表里） */
+    private LocalDateTime offlineTime;
     /** 设备序列号 */
     private String serialNumber;
     /** 设备名称 */
@@ -35,12 +44,13 @@ public class DeviceInfo {
         return deviceId;
     }
 
-    public void setDeviceId(String deviceId) {
-        this.deviceId = deviceId;
+    @JsonIgnore
+    public long getConnectionGeneration() {
+        return connectionGeneration;
     }
 
-    public int getlUserId() {
-        return lUserId;
+    public void setDeviceId(String deviceId) {
+        this.deviceId = deviceId;
     }
 
     public int getLUserId() {
@@ -73,6 +83,14 @@ public class DeviceInfo {
 
     public void setOnlineTime(LocalDateTime onlineTime) {
         this.onlineTime = onlineTime;
+    }
+
+    public LocalDateTime getOfflineTime() {
+        return offlineTime;
+    }
+
+    public void setOfflineTime(LocalDateTime offlineTime) {
+        this.offlineTime = offlineTime;
     }
 
     public String getSerialNumber() {

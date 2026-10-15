@@ -50,7 +50,7 @@
         <div><h1 id="page-title">实时预览</h1><p id="page-description">选择在线设备，发起视频预览并查看推流状态。</p></div>
         <button type="button" id="refresh-all" data-action="refresh"><svg><use href="#icon-refresh"/></svg>刷新数据</button>
       </div>
-      <div class="notice" role="note"><span class="notice-label">安全提示</span><span>仅供内网联调；媒体路径 /media/** 不鉴权，请勿将服务端口直接暴露到公网。</span></div>
+      <div class="notice" role="note"><span class="notice-label">安全提示</span><span>仅供受控环境联调；媒体地址使用短期签名，过期后需重新获取会话状态。</span></div>
       <div id="feedback" class="feedback" role="alert" hidden><span id="feedback-text"></span><button type="button" data-action="dismiss" aria-label="关闭提示">关闭</button></div>
       <section class="summary-grid" aria-label="服务概况">
         <article class="stat-card"><span class="stat-label">服务状态</span><strong id="stat-service">未检查</strong><span id="stat-uptime" class="stat-note">等待健康检查</span></article>
@@ -73,7 +73,7 @@
               <div class="form-grid preview-grid">
                 <div class="field"><label for="pv-device">设备编号 <span class="required">*</span></label><input id="pv-device" name="deviceId" placeholder="选择或输入 deviceId" required autocomplete="off"></div>
                 <div class="field"><label for="pv-channel">通道号 <span class="required">*</span></label><input id="pv-channel" name="channel" type="number" min="1" step="1" value="1" required></div>
-                <div class="field"><label for="pv-stream">码流类型</label><select id="pv-stream"><option value="0">主码流</option><option value="1">子码流</option><option value="2">第三码流</option></select></div>
+                <div class="field"><label for="pv-stream">码流类型</label><select id="pv-stream"><option value="0">主码流</option><option value="1" selected>子码流</option><option value="2">第三码流</option></select></div>
                 <div class="field"><label for="pv-link">传输方式</label><select id="pv-link"><option value="">跟随服务配置</option><option value="0">TCP</option><option value="1">UDP</option><option value="2">HRUDP</option></select></div>
               </div>
               <div class="form-actions"><button class="primary" id="preview-submit" type="submit">开始预览</button><span id="pv-status" class="form-status" role="status"></span></div>
@@ -82,8 +82,8 @@
               <div class="form-grid two-column">
                 <div class="field"><label for="pb-device">设备编号 <span class="required">*</span></label><input id="pb-device" name="deviceId" placeholder="选择或输入 deviceId" required autocomplete="off"></div>
                 <div class="field"><label for="pb-channel">通道号 <span class="required">*</span></label><input id="pb-channel" name="channel" type="number" min="1" step="1" value="1" required></div>
-                <div class="field"><label for="pb-start">开始时间 <span class="required">*</span></label><input id="pb-start" type="datetime-local" step="1" required></div>
-                <div class="field"><label for="pb-end">结束时间 <span class="required">*</span></label><input id="pb-end" type="datetime-local" step="1" required></div>
+                <div class="field"><label for="pb-start">开始时间 <span class="required">*</span></label><input id="pb-start" type="datetime-local" step="1" required aria-describedby="pb-start-normalized"><p id="pb-start-normalized" class="field-help mono"></p></div>
+                <div class="field"><label for="pb-end">结束时间 <span class="required">*</span></label><input id="pb-end" type="datetime-local" step="1" required aria-describedby="pb-end-normalized"><p id="pb-end-normalized" class="field-help mono"></p></div>
               </div>
               <div class="range-shortcuts"><span>快捷时间</span><button type="button" data-range="10" data-prefix="pb">最近 10 分钟</button><button type="button" data-range="60" data-prefix="pb">最近 1 小时</button><button type="button" data-range="1440" data-prefix="pb">最近 24 小时</button></div>
               <p class="field-help">按录像机本地时间查询；快捷时间使用当前电脑时间，请确认两端时间一致。</p>
@@ -105,12 +105,14 @@
               <div class="form-grid two-column">
                 <div class="field"><label for="dl-device">设备编号 <span class="required">*</span></label><input id="dl-device" name="deviceId" list="device-options" placeholder="输入或选择 deviceId" required autocomplete="off"><datalist id="device-options"></datalist></div>
                 <div class="field"><label for="dl-channel">通道号 <span class="required">*</span></label><input id="dl-channel" name="channel" type="number" min="1" step="1" value="1" required></div>
-                <div class="field full-width"><label for="dl-start">开始时间 <span class="required">*</span></label><input id="dl-start" type="datetime-local" step="1" required></div>
-                <div class="field full-width"><label for="dl-end">结束时间 <span class="required">*</span></label><input id="dl-end" type="datetime-local" step="1" required></div>
+                <div class="field full-width"><label for="dl-start">开始时间 <span class="required">*</span></label><input id="dl-start" type="datetime-local" step="1" required aria-describedby="dl-start-normalized"><p id="dl-start-normalized" class="field-help mono"></p></div>
+                <div class="field full-width"><label for="dl-end">结束时间 <span class="required">*</span></label><input id="dl-end" type="datetime-local" step="1" required aria-describedby="dl-end-normalized"><p id="dl-end-normalized" class="field-help mono"></p></div>
               </div>
               <div class="range-shortcuts"><button type="button" data-range="10" data-prefix="dl">最近 10 分钟</button><button type="button" data-range="60" data-prefix="dl">最近 1 小时</button><button type="button" data-range="1440" data-prefix="dl">最近 24 小时</button></div>
               <p class="field-help">按录像机本地时间填写。服务端异步生成 MP4，完成后再保存文件。</p>
-              <div class="form-actions"><button class="primary" id="download-submit" type="submit">创建下载任务</button></div>
+              <div class="form-actions"><button class="primary" id="download-submit" type="submit">创建下载任务</button><button type="button" id="channel-probe">查询可用通道</button></div>
+              <p class="field-help">不确定通道号就先「查询可用通道」：按上面的时间段逐通道试出有录像的通道，点结果即可填入。</p>
+              <div id="channel-probe-result" class="range-shortcuts" role="status"></div>
             </form>
           </article>
           <article class="panel"><div class="panel-heading"><h2>当前下载任务</h2><span id="dl-status" class="tag" role="status">未创建</span></div><div class="task-content">

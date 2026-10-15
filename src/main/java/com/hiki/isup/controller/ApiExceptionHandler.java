@@ -13,7 +13,11 @@ import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.server.ResponseStatusException;
+import org.springframework.web.servlet.NoHandlerFoundException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
+import java.io.IOException;
 import java.util.List;
 
 /**
@@ -81,11 +85,84 @@ public class ApiExceptionHandler {
                 .body(new ErrorResponse("BAD_REQUEST", e.getMessage()));
     }
 
+    /**
+     * 并发会话数触顶等资源受限场景。属于可重试的临时状态，用 503 让调用方稍后重试，
+     * 而不是打成 500 让人误以为服务坏了。
+     */
+    @ExceptionHandler(IllegalStateException.class)
+    public ResponseEntity<ErrorResponse> handleIllegalState(IllegalStateException e) {
+        log.warn("服务资源受限：{}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(new ErrorResponse("TOO_MANY_SESSIONS", e.getMessage()));
+    }
+
+    /**
+     * 静态资源不存在，最常见的就是浏览器自动发起的 /favicon.ico 请求。
+     *
+     * <p>这类请求不是业务故障，只回 404 且不打堆栈，否则每次打开页面都会刷一条
+     * ERROR + 完整堆栈，把真正的错误日志淹掉。</p>
+     */
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<Void> handleNoResourceFound(NoResourceFoundException e) {
+        log.debug("静态资源不存在：{}", e.getResourcePath());
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+    }
+
+    @ExceptionHandler(ResponseStatusException.class)
+    public ResponseEntity<ErrorResponse> handleResponseStatus(ResponseStatusException e) {
+        HttpStatus status = HttpStatus.resolve(e.getStatusCode().value());
+        String code = status == null ? "HTTP_ERROR" : status.name();
+        log.debug("HTTP 请求未完成：status={}, reason={}", e.getStatusCode(), e.getReason());
+        return ResponseEntity.status(e.getStatusCode()).headers(e.getHeaders())
+                .body(new ErrorResponse(code, e.getReason()));
+    }
+
+    @ExceptionHandler(NoHandlerFoundException.class)
+    public ResponseEntity<Void> handleNoHandlerFound(NoHandlerFoundException e) {
+        log.debug("请求路径不存在：{}", e.getRequestURL());
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleException(Exception e) {
+        if (isClientDisconnect(e)) {
+            log.info("客户端已断开，响应未写回：{}", e.toString());
+            return ResponseEntity.status(499).build();
+        }
         log.error("服务器内部错误", e);
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body(new ErrorResponse("INTERNAL_ERROR", e.getMessage() == null ? e.toString() : e.getMessage()));
+    }
+
+    /**
+     * 调用方提前断开（刷新、超时、取消）。业务往往已经做完，只是响应写不回去。
+     */
+    static boolean isClientDisconnect(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            String name = current.getClass().getName();
+            if (name.endsWith("AsyncRequestNotUsableException") || name.endsWith("ClientAbortException")) {
+                return true;
+            }
+            if (current instanceof IOException && isResetMessage(current.getMessage())) {
+                return true;
+            }
+            Throwable next = current.getCause();
+            if (next == current) {
+                break;
+            }
+            current = next;
+        }
+        return false;
+    }
+
+    private static boolean isResetMessage(String message) {
+        if (message == null) {
+            return false;
+        }
+        return message.contains("Connection reset")
+                || message.contains("Broken pipe")
+                || message.contains("中止了一个已建立的连接");
     }
 
     /** 便于测试断言：暴露字段错误信息转换逻辑 */

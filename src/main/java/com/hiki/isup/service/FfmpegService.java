@@ -29,19 +29,36 @@ public class FfmpegService {
     public FfmpegProcess startHls(IsupProperties properties, Path dir, String sessionId) throws IOException {
         Files.createDirectories(dir);
         List<String> command = buildHlsCommand(properties, dir);
-        return start(properties, command, dir, sessionId);
+        // 实时流：宁可丢帧也不让背压顶回 SDK 回调线程
+        return start(properties, command, dir, sessionId, true);
     }
 
     /**
      * 启动 MP4 输出进程，输出到 file。
      */
     public FfmpegProcess startMp4(IsupProperties properties, Path file, String sessionId) throws IOException {
+        RecordingStorageGuard.checkOutput(file, RecordingStorageGuard.MAX_OUTPUT_BYTES);
         Path parent = file.getParent();
         if (parent != null) {
             Files.createDirectories(parent);
         }
         List<String> command = buildMp4Command(properties, file);
-        return start(properties, command, parent, sessionId);
+        // 下载：文件必须完整，队列满时等待而不是丢包
+        FfmpegProcess process = start(properties, command, parent, sessionId, false);
+        process.monitorOutput(() -> RecordingStorageGuard.checkOutput(file, RecordingStorageGuard.MAX_OUTPUT_BYTES));
+        return process;
+    }
+
+    /** 打包录像直接保存原始 PS，最终成片在时间验证之后只生成一次。 */
+    public FfmpegProcess startPackingCapture(IsupProperties properties, Path rawFile,
+                                            String sessionId) throws IOException {
+        RecordingSourceCapture capture = new RecordingSourceCapture(rawFile);
+        try {
+            return FfmpegProcess.capture(capture, sessionId);
+        } catch (RuntimeException e) {
+            try { capture.close(); } catch (IOException close) { e.addSuppressed(close); }
+            throw e;
+        }
     }
 
     /**
@@ -55,7 +72,11 @@ public class FfmpegService {
         command.add("-loglevel");
         command.add(cfg.getLogLevel());
         appendInputArgs(command, cfg);
-        command.addAll(splitArgs(cfg.getCodecArgs()));
+        command.addAll(resolveCodecArgs(cfg, cfg.getHlsCodecArgs()));
+        if (cfg.getThreads() > 0) {
+            command.add("-threads");
+            command.add(String.valueOf(cfg.getThreads()));
+        }
         command.add("-f");
         command.add("hls");
         command.add("-hls_time");
@@ -81,10 +102,23 @@ public class FfmpegService {
         command.add("-loglevel");
         command.add(cfg.getLogLevel());
         appendInputArgs(command, cfg);
-        command.addAll(splitArgs(cfg.getCodecArgs()));
+        command.addAll(resolveCodecArgs(cfg, cfg.getMp4CodecArgs()));
         command.addAll(splitArgs(cfg.getMp4Args()));
+        command.add("-fs");
+        command.add(String.valueOf(RecordingStorageGuard.MAX_OUTPUT_BYTES));
         command.add(file.toString());
         return command;
+    }
+
+    /**
+     * 取某类输出实际使用的编码参数：专用配置非空就用专用的，否则回退通用 codec-args。
+     *
+     * <p>拆开是因为 HLS 和 MP4 对编码的容忍度不同——浏览器解不了 HEVC，
+     * 但 MP4 装得下 HEVC，没必要为下载付转码的 CPU。</p>
+     */
+    private static List<String> resolveCodecArgs(IsupProperties.Ffmpeg cfg, String dedicated) {
+        String args = (dedicated != null && !dedicated.isBlank()) ? dedicated : cfg.getCodecArgs();
+        return splitArgs(args);
     }
 
     /**
@@ -95,12 +129,15 @@ public class FfmpegService {
      */
     private static void appendInputArgs(List<String> command, IsupProperties.Ffmpeg cfg) {
         command.add("-analyzeduration");
-        command.add("2000000");
+        command.add(String.valueOf(cfg.getAnalyzeDuration()));
         command.add("-probesize");
-        command.add("2000000");
-        // ISUP PS 流常缺少 PTS，让 ffmpeg 自动生成
+        command.add(String.valueOf(cfg.getProbeSize()));
         command.add("-fflags");
-        command.add("+genpts");
+        command.add(cfg.getInputFlags());
+        if (cfg.getAvoidNegativeTs() != null && !cfg.getAvoidNegativeTs().isBlank()) {
+            command.add("-avoid_negative_ts");
+            command.add(cfg.getAvoidNegativeTs().trim());
+        }
         String inputFormat = cfg.getPsInputFormat();
         if (inputFormat != null && !inputFormat.isBlank() && !"auto".equalsIgnoreCase(inputFormat.trim())) {
             command.add("-f");
@@ -123,7 +160,14 @@ public class FfmpegService {
         return result;
     }
 
-    private FfmpegProcess start(IsupProperties properties, List<String> command, Path workDir, String sessionId)
+    private FfmpegProcess start(IsupProperties properties, List<String> command, Path workDir, String sessionId,
+                                boolean dropWhenFull)
+            throws IOException {
+        return start(properties, command, workDir, sessionId, dropWhenFull, null);
+    }
+
+    private FfmpegProcess start(IsupProperties properties, List<String> command, Path workDir, String sessionId,
+                                boolean dropWhenFull, java.io.OutputStream sourceCapture)
             throws IOException {
         ProcessBuilder builder = new ProcessBuilder(command);
         builder.redirectErrorStream(false);
@@ -137,7 +181,7 @@ public class FfmpegService {
         log.info("启动 ffmpeg，sessionId={}, 命令={}", sessionId, commandLine);
         try {
             Process process = builder.start();
-            FfmpegProcess wrapper = new FfmpegProcess(process, commandLine);
+            FfmpegProcess wrapper = new FfmpegProcess(process, commandLine, dropWhenFull, sourceCapture);
             wrapper.startStderrPump(sessionId);
             return wrapper;
         } catch (IOException e) {

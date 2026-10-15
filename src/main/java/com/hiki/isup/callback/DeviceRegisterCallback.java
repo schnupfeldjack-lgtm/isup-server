@@ -11,6 +11,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.hiki.isup.sdk.NativeSdkLoader.copyTo;
 import static com.hiki.isup.sdk.NativeSdkLoader.readString;
@@ -33,6 +34,16 @@ import static com.hiki.isup.sdk.NativeSdkLoader.readString;
 public class DeviceRegisterCallback implements HCISUPCMS.DEVICE_REGISTER_CB {
 
     private static final Logger log = LoggerFactory.getLogger(DeviceRegisterCallback.class);
+
+    /** 图片服务器端口（抓图上报用），与官方 Demo 保持一致 */
+    private static final int PICTURE_SERVER_PORT = 6011;
+
+    /** 重注册风暴判定：60 秒滑动窗口内重注册达到这个次数就打 WARN 提示 */
+    private static final int STORM_THRESHOLD = 20;
+    private static final long STORM_WINDOW_MS = 60_000L;
+
+    private final AtomicInteger reRegisterCount = new AtomicInteger();
+    private volatile long reRegisterWindowStart = System.currentTimeMillis();
 
     private final IsupProperties properties;
     private final DeviceRegistry deviceRegistry;
@@ -61,14 +72,28 @@ public class DeviceRegisterCallback implements HCISUPCMS.DEVICE_REGISTER_CB {
                 case HCISUPCMS.EHOME_REGISTER_TYPE.ENUM_DEV_OFF -> handleOffline(lUserID);
                 case HCISUPCMS.EHOME_REGISTER_TYPE.ENUM_DEV_ADDRESS_CHANGED ->
                         log.info("设备地址发生变化，lUserID={}", lUserID);
-                case HCISUPCMS.EHOME_REGISTER_TYPE.ENUM_DEV_DAS_REREGISTER ->
-                        log.info("设备重注册，lUserID={}", lUserID);
+                case HCISUPCMS.EHOME_REGISTER_TYPE.ENUM_DEV_DAS_REREGISTER -> {
+                    int n = countInWindow();
+                    log.info("设备重注册，lUserID={}（近 60s 第 {} 次）", lUserID, n);
+                    if (n == STORM_THRESHOLD) {
+                        log.warn("设备重注册风暴：60 秒内已 {} 次。这类高频抖动基本都是设备侧问题——"
+                                + "①设备「平台接入」里同时启用了中心1/中心2（两条注册互踢）；"
+                                + "②设备固件不支持 ISUP 告警主机 ISAPI。服务端改不了，请到设备网页只保留一个中心", n);
+                    }
+                }
                 case HCISUPCMS.EHOME_REGISTER_TYPE.ENUM_DEV_DAS_PINGREO ->
                         log.debug("设备注册心跳，lUserID={}", lUserID);
                 case HCISUPCMS.EHOME_REGISTER_TYPE.ENUM_DEV_DAS_EHOMEKEY_ERROR ->
                         log.error("ISUP 密钥校验失败，请检查 isup.ehome-key 与录像机配置是否一致，lUserID={}", lUserID);
                 case HCISUPCMS.EHOME_REGISTER_TYPE.ENUM_DEV_SESSIONKEY_ERROR ->
-                        log.error("SessionKey 交互异常，lUserID={}", lUserID);
+                        // SDK 在 SetHost 时 ISAPI 透传 GET /ISAPI/Event/notification/httpHosts 超时
+                        // （SDK 日志 error[10]），设备不支持该接口 → 被踢下线重注册。
+                        // SetHost 是 SDK 每次上线的固定动作，isup.server-info-enabled=false
+                        // 无法跳过，只能由设备侧支持该 ISAPI 或改用 ISUP 4.0 协议根治。
+                        // 用 WARN 不用 ERROR：设备在线、预览/回放都正常，这只是 SDK 周期性下发
+                        // 告警主机失败留下的噪音，服务端改不掉，标 ERROR 会让人误以为服务挂了。
+                        log.warn("设备不响应 ISAPI 告警主机查询（GET /ISAPI/Event/notification/httpHosts），"
+                                + "SDK 会周期性重连它一次；设备在线和取流不受影响。lUserID={}", lUserID);
                 case HCISUPCMS.EHOME_REGISTER_TYPE.ENUM_DEV_SESSIONKEY_REQ ->
                         log.debug("设备 SessionKey 请求，lUserID={}", lUserID);
                 case HCISUPCMS.EHOME_REGISTER_TYPE.ENUM_DEV_SLEEP ->
@@ -94,27 +119,39 @@ public class DeviceRegisterCallback implements HCISUPCMS.DEVICE_REGISTER_CB {
         log.info("设备上线：deviceId={}, lUserID={}, ip={}, serial={}, name={}",
                 deviceId, lUserID, deviceIp, serial, devName);
 
-        // 回传给设备的服务器信息（必须是公网地址）
+        // 注册保活参数始终回传；总开关仅控制可选的告警、图片服务器信息。
         String publicIp = properties.getPublicIp();
         int cmsPort = properties.getCms().getListenPort();
+        boolean alarmEnabled = properties.isServerInfoEnabled() && properties.isAlarmServerEnabled();
+        boolean pictureEnabled = properties.isServerInfoEnabled() && properties.isPictureServerEnabled();
         HCISUPCMS.NET_EHOME_SERVER_INFO_V50 serverInfo = new HCISUPCMS.NET_EHOME_SERVER_INFO_V50();
-        serverInfo.read();
         serverInfo.dwSize = serverInfo.size();
 
-        copyTo(serverInfo.struUDPAlarmSever.szIP, publicIp);
-        serverInfo.struUDPAlarmSever.wPort = (short) cmsPort;
-        copyTo(serverInfo.struTCPAlarmSever.szIP, publicIp);
-        serverInfo.struTCPAlarmSever.wPort = (short) cmsPort;
-        serverInfo.dwAlarmServerType = 1;   // 支持 UDP、TCP 两种上报
+        // 与 CMS 监听端使用相同的心跳周期和超时次数。
+        serverInfo.dwKeepAliveSec = properties.getKeepAliveSec();
+        serverInfo.dwTimeOutCount = properties.getTimeOutCount();
+        serverInfo.dwAlarmKeepAliveSec = properties.getKeepAliveSec();
+        serverInfo.dwAlarmTimeOutCount = properties.getTimeOutCount();
 
-        copyTo(serverInfo.struPictureSever.szIP, publicIp);
-        serverInfo.struPictureSever.wPort = (short) 6011;
-        serverInfo.dwPicServerType = 4;     // ISUP5.0 图片服务器
+        if (alarmEnabled) {
+            copyTo(serverInfo.struUDPAlarmSever.szIP, publicIp);
+            serverInfo.struUDPAlarmSever.wPort = (short) cmsPort;
+            copyTo(serverInfo.struTCPAlarmSever.szIP, publicIp);
+            serverInfo.struTCPAlarmSever.wPort = (short) cmsPort;
+            serverInfo.dwAlarmServerType = 1;   // 支持 UDP、TCP 两种上报
+        }
+
+        if (pictureEnabled) {
+            copyTo(serverInfo.struPictureSever.szIP, publicIp);
+            serverInfo.struPictureSever.wPort = (short) PICTURE_SERVER_PORT;
+            serverInfo.dwPicServerType = 4;     // ISUP5.0 图片服务器
+        }
 
         serverInfo.write();
         int len = serverInfo.size();
         pInBuffer.write(0, serverInfo.getPointer().getByteArray(0, len), 0, len);
-        log.info("已回传服务器信息给设备：deviceId={}, publicIp={}, cmsPort={}", deviceId, publicIp, cmsPort);
+        log.info("已回传服务器信息：deviceId={}, size={}, keepAliveSec={}, timeOutCount={}, alarmEnabled={}, pictureEnabled={}",
+                deviceId, len, serverInfo.dwKeepAliveSec, serverInfo.dwTimeOutCount, alarmEnabled, pictureEnabled);
     }
 
     // ==================== ISUP5.0 认证 ====================
@@ -177,11 +214,20 @@ public class DeviceRegisterCallback implements HCISUPCMS.DEVICE_REGISTER_CB {
     // ==================== 设备下线 ====================
 
     private void handleOffline(int lUserID) {
-        String deviceId = deviceRegistry.offline(lUserID);
-        if (deviceId != null) {
-            // 当前处于 SDK 注册回调线程，异步停止，避免在回调内重入 SDK
-            sessionManager.stopByDeviceAsync(deviceId);
+        // 掉线先进宽限期（DeviceRegistry 里配的 isup.device-offline-grace-sec），
+        // 抖动时设备大概率几秒内就重连，等宽限期过了还没回来才停它的会话，
+        // 否则上下线抖一次预览就断一次。回调在 SDK 线程里执行，停止动作本身是异步的。
+        deviceRegistry.offlineConnection(lUserID, sessionManager::stopByConnectionAsync);
+    }
+
+    /** 60 秒滑动窗口内的重注册计数（回调在 native 线程里，用原子量足够） */
+    private int countInWindow() {
+        long now = System.currentTimeMillis();
+        if (now - reRegisterWindowStart >= STORM_WINDOW_MS) {
+            reRegisterWindowStart = now;
+            reRegisterCount.set(0);
         }
+        return reRegisterCount.incrementAndGet();
     }
 
     private HCISUPCMS.NET_EHOME_DEV_REG_INFO_V12 readRegInfo(Pointer pOutBuffer) {

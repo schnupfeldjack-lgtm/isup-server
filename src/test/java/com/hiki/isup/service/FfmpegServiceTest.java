@@ -15,6 +15,22 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class FfmpegServiceTest {
 
+    @Test void packingCaptureDoesNotRunFfmpegOrCreateIntermediateMp4(@org.junit.jupiter.api.io.TempDir Path temp) throws Exception {
+        IsupProperties properties = properties();
+        properties.setFfmpegPath(temp.resolve("ffmpeg-does-not-exist").toString());
+        Path raw = temp.resolve("session/recording-source.ps");
+        FfmpegProcess capture = new FfmpegService().startPackingCapture(properties, raw, "capture");
+        try {
+            capture.write(new byte[]{0, 0, 1, (byte) 0xba}, 0, 4);
+            capture.closeStdin();
+            assertEquals(0, capture.waitFor(3));
+            org.junit.jupiter.api.Assertions.assertArrayEquals(new byte[]{0, 0, 1, (byte) 0xba}, java.nio.file.Files.readAllBytes(raw));
+            try (var files = java.nio.file.Files.list(raw.getParent())) {
+                assertEquals(java.util.List.of("recording-source.ps"), files.map(p -> p.getFileName().toString()).toList());
+            }
+        } finally { capture.destroy(); }
+    }
+
     private IsupProperties properties() {
         IsupProperties properties = new IsupProperties();
         properties.setFfmpegPath("ffmpeg");
@@ -56,6 +72,8 @@ class FfmpegServiceTest {
         assertTrue(command.contains("mp4"));
         assertTrue(command.contains("+frag_keyframe+empty_moov"), "进程被中断时文件仍可播放");
         assertEquals(file.toString(), command.get(command.size() - 1));
+        assertEquals(String.valueOf(RecordingStorageGuard.MAX_OUTPUT_BYTES), command.get(command.indexOf("-fs") + 1),
+                "手动下载也必须带输出文件大小上限");
     }
 
     @Test

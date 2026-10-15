@@ -1,7 +1,11 @@
 package com.hiki.isup.controller;
 
 import com.hiki.isup.config.ApiKeyInterceptor;
+import com.hiki.isup.model.MediaSession;
+import com.hiki.isup.model.SessionStatus;
+import com.hiki.isup.model.SessionType;
 import com.hiki.isup.service.DeviceRegistry;
+import com.hiki.isup.service.SessionManager;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -31,10 +35,38 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "isup.api-key=" + IsupApiWebTest.API_KEY,
         "isup.public-ip=203.0.113.10",
         "isup.ehome-key=test-ehome-key",
-        "isup.media-dir=target/test-media"
+        "isup.media-dir=target/test-media",
+        "isup.waybill-video.enabled=false"
 })
 @AutoConfigureMockMvc
 class IsupApiWebTest {
+
+    @Test
+    void recordingDiagnosticsAreAuthenticatedAndDoNotNeedDatabaseOrSdk() throws Exception {
+        mockMvc.perform(get("/api/v1/recordings/diagnostics"))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/api/v1/recordings/diagnostics")
+                        .header(ApiKeyInterceptor.API_KEY_HEADER, API_KEY))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.enabled").value(false))
+                .andExpect(jsonPath("$.resources.reservedSlots").isNumber())
+                .andExpect(jsonPath("$.retry.capacity").isNumber())
+                .andExpect(jsonPath("$.queue.sampleLimit").isNumber());
+    }
+
+    @Test
+    void retryRecoveryRequiresAuthenticationAndExplicitVersionAndReason() throws Exception {
+        mockMvc.perform(post("/api/v1/recordings/retries/order-1/release")
+                        .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(post("/api/v1/recordings/retries/order-1/release")
+                        .header(ApiKeyInterceptor.API_KEY_HEADER, API_KEY)
+                        .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/v1/recordings/retries/unknown-record")
+                        .header(ApiKeyInterceptor.API_KEY_HEADER, API_KEY))
+                .andExpect(status().isNotFound());
+    }
 
     /** 包级可见：注解（位于类体作用域之外）需要引用它作常量表达式 */
     static final String API_KEY = "test-api-key";
@@ -45,15 +77,18 @@ class IsupApiWebTest {
     @Autowired
     private DeviceRegistry deviceRegistry;
 
+    @Autowired
+    private SessionManager sessionManager;
+
     @Test
     @DisplayName("健康检查不需要鉴权")
     void healthNoAuth() throws Exception {
         mockMvc.perform(get("/api/health"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("UP"))
-                .andExpect(jsonPath("$.cmsPort").value(7660))
+                .andExpect(jsonPath("$.cmsPort").value(8660))
                 .andExpect(jsonPath("$.previewPort").value(8003))
-                .andExpect(jsonPath("$.playbackPort").value(8004));
+                .andExpect(jsonPath("$.playbackPort").value(8661));
     }
 
     @Test
@@ -146,6 +181,25 @@ class IsupApiWebTest {
                         .header(ApiKeyInterceptor.API_KEY_HEADER, API_KEY))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error").value("NOT_FOUND"));
+    }
+
+    @Test
+    @DisplayName("会话状态返回短时效签名播放地址，不泄露内部裸地址")
+    void sessionStatusRefreshesSignedPlayUrl() throws Exception {
+        MediaSession session = sessionManager.create(SessionType.PREVIEW, "GW4206623", 1);
+        session.setPlayUrl("/media/preview/" + session.getSessionId() + "/index.m3u8");
+        try {
+            mockMvc.perform(get("/api/v1/sessions/" + session.getSessionId())
+                            .header(ApiKeyInterceptor.API_KEY_HEADER, API_KEY))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.playUrl").value(org.hamcrest.Matchers.matchesPattern(
+                            "/media/[0-9]+/[A-Za-z0-9_-]+/preview/"
+                                    + session.getSessionId() + "/index\\.m3u8")))
+                    .andExpect(jsonPath("$.playUrl").value(org.hamcrest.Matchers.not(
+                            org.hamcrest.Matchers.equalTo(session.getPlayUrl()))));
+        } finally {
+            sessionManager.stop(session, SessionStatus.STOPPED, "test cleanup");
+        }
     }
 
     @Test

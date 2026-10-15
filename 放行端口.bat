@@ -19,8 +19,8 @@ netsh advfirewall firewall add rule name="ISUP-CMS-7660" dir=in action=allow pro
 echo  [1/3] 7660  CMS 注册        已放行
 netsh advfirewall firewall add rule name="ISUP-Preview-8003" dir=in action=allow protocol=TCP localport=8003 >nul
 echo  [2/3] 8003  实时预览        已放行
-netsh advfirewall firewall add rule name="ISUP-Playback-8004" dir=in action=allow protocol=TCP localport=8004 >nul
-echo  [3/3] 8004  回放 / 录像下载 已放行
+netsh advfirewall firewall add rule name="ISUP-Playback-8661" dir=in action=allow protocol=TCP localport=8661 >nul
+echo  [3/3] 8661  回放 / 录像下载 已放行
 
 echo.
 echo  自校验（应显示 LocalPort: 7660）：

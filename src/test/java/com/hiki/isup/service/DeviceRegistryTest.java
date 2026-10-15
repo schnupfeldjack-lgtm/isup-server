@@ -6,7 +6,12 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -19,9 +24,10 @@ class DeviceRegistryTest {
 
     private DeviceRegistry registry;
 
+    /** 宽限期设 0：下线即移除，测的是不含抖动的常规行为 */
     @BeforeEach
     void setUp() {
-        registry = new DeviceRegistry();
+        registry = new DeviceRegistry(0);
     }
 
     @Test
@@ -77,6 +83,68 @@ class DeviceRegistryTest {
         // 下线回调只带 lUserID，应精确移除当前占用的那个
         assertEquals("GW9806925", registry.offline(0));
         assertEquals(0, registry.onlineCount());
+    }
+
+    @Test
+    @DisplayName("掉线宽限期内条目保留为「重连中」，超时后才真正移除，且只在真移除时停会话")
+    void offlineGracePeriod() throws Exception {
+        DeviceRegistry grace = new DeviceRegistry(1);
+        List<String> stopped = new ArrayList<>();
+
+        grace.online(1001, "GW9806925", "192.168.22.211", "SN-A", null);
+        assertEquals("GW9806925", grace.offline(1001, stopped::add));
+
+        // 宽限期内：还在列表里，但标记为不在线
+        assertNotNull(grace.get("GW9806925"), "抖动时不该立刻从列表消失");
+        assertFalse(grace.get("GW9806925").isOnline());
+        assertEquals(0, grace.onlineCount(), "在线数只统计真在线的");
+        assertTrue(stopped.isEmpty(), "宽限期内不能急着停会话，否则抖一次断一次");
+
+        // 超时未重连：真正移除，并触发会话停止
+        Thread.sleep(1500);
+        assertNull(grace.get("GW9806925"));
+        assertEquals(List.of("GW9806925"), stopped);
+    }
+
+    @Test
+    @DisplayName("宽限期内重连：取消移除、保住原上线时间")
+    void reconnectWithinGracePeriod() throws Exception {
+        DeviceRegistry grace = new DeviceRegistry(1);
+        List<String> stopped = new ArrayList<>();
+
+        grace.online(1001, "GW9806925", "192.168.22.211", "SN-A", null);
+        LocalDateTime firstOnline = grace.get("GW9806925").getOnlineTime();
+        grace.offline(1001, stopped::add);
+        grace.online(1002, "GW9806925", "192.168.22.211", "SN-A", null);
+
+        Thread.sleep(1500);
+        assertNotNull(grace.get("GW9806925"), "重连后不能被延迟任务误删");
+        assertTrue(grace.get("GW9806925").isOnline());
+        assertEquals(firstOnline, grace.get("GW9806925").getOnlineTime(), "上线时间不该跟着抖动乱跳");
+        assertEquals(1002, grace.get("GW9806925").getLUserId());
+        assertTrue(stopped.isEmpty(), "重连成功就不该停会话");
+    }
+
+    @Test
+    @DisplayName("已经开始执行的旧宽限期任务不能删除重连后的新设备")
+    void staleGraceTaskCannotRemoveReconnectedDevice() {
+        DeviceRegistry grace = new DeviceRegistry(30);
+        List<String> stopped = new ArrayList<>();
+        try {
+            grace.online(1001, "GW9806925", "192.168.22.211", "SN-A", null);
+            grace.offline(1001, stopped::add);
+            DeviceInfo expectedOffline = grace.get("GW9806925");
+
+            grace.online(1002, "GW9806925", "192.168.22.212", "SN-A", null);
+            grace.expireOffline("GW9806925", expectedOffline, stopped::add);
+
+            assertNotNull(grace.get("GW9806925"));
+            assertTrue(grace.get("GW9806925").isOnline());
+            assertEquals(1002, grace.get("GW9806925").getLUserId());
+            assertTrue(stopped.isEmpty(), "旧任务不能停止新连接上的会话");
+        } finally {
+            grace.shutdown();
+        }
     }
 
     @Test

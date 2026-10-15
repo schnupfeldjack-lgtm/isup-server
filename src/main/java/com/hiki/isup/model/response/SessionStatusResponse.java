@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonFormat;
 import com.hiki.isup.model.MediaSession;
 import com.hiki.isup.model.SessionStatus;
 import com.hiki.isup.model.SessionType;
+import com.hiki.isup.service.FfmpegProcess;
 
 import java.time.LocalDateTime;
 
@@ -22,6 +23,8 @@ public class SessionStatusResponse {
     private String downloadUrl;
     private Long fileSize;
     private Long bytesReceived;
+    /** 因 ffmpeg 消费滞后而丢弃的码流包数，仅实时流会话有值 */
+    private Long droppedPackets;
 
     @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
     private LocalDateTime startTime;
@@ -52,10 +55,22 @@ public class SessionStatusResponse {
         r.updatedAt = session.getUpdatedAt();
         r.error = session.getError();
         r.bytesReceived = session.getBytesReceived();
+        FfmpegProcess ffmpeg = session.getFfmpegProcess();
+        if (ffmpeg != null) {
+            r.droppedPackets = ffmpeg.getDroppedPackets();
+        }
         if (session.getType() == SessionType.DOWNLOAD) {
             r.downloadUrl = "/api/v1/download/" + session.getSessionId() + "/file";
         }
         return r;
+    }
+
+    public Long getDroppedPackets() {
+        return droppedPackets;
+    }
+
+    public void setDroppedPackets(Long droppedPackets) {
+        this.droppedPackets = droppedPackets;
     }
 
     public String getSessionId() {

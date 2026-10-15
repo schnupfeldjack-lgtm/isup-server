@@ -50,6 +50,22 @@ export function toApiDateTime(value) {
   return `${match[1]}-${match[2]}-${match[3]} ${match[4]}:${match[5]}:${match[6] || '00'}`;
 }
 
+/** 用固定的 24 小时制展示浏览器日期控件实际提交的值。 */
+export function describeApiDateTime(value) {
+  return `实际提交：${toApiDateTime(value)}（24 小时制）`;
+}
+
+/** 解析并校验时间范围，避免直接依赖浏览器本地化后的 12 小时制显示。 */
+export function validateTimeRange(startValue, endValue) {
+  const startTime = toApiDateTime(startValue);
+  const endTime = toApiDateTime(endValue);
+  if (endTime <= startTime) {
+    const midnightHint = / 00:\d{2}:\d{2}$/.test(endTime) ? '；“上午 12 点”是凌晨 0 点，中午 12 点请选择“下午 12 点”' : '';
+    throw new Error(`结束时间 ${endTime} 必须晚于开始时间 ${startTime}${midnightHint}`);
+  }
+  return { startTime, endTime };
+}
+
 export function formatBytes(value) {
   if (value === null || value === undefined || value === '') return '—';
   const bytes = Number(value);

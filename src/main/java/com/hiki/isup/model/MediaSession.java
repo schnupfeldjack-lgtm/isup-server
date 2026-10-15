@@ -1,10 +1,14 @@
 package com.hiki.isup.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.hiki.isup.service.FfmpegProcess;
+import com.hiki.isup.service.HikStreamClock;
 
 import java.time.LocalDateTime;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 
 /**
  * 一路媒体会话（预览 / 回放 / 下载）。
@@ -23,6 +27,8 @@ public class MediaSession {
     private final String deviceId;
     private final int channel;
     private final LocalDateTime createdAt;
+    /** 创建会话时的注册连接快照；对象身份区分 SDK 登录句柄复用后的新连接。 */
+    private final DeviceInfo deviceConnection;
 
     private volatile SessionStatus status = SessionStatus.STARTING;
     private volatile LocalDateTime updatedAt = LocalDateTime.now();
@@ -40,31 +46,122 @@ public class MediaSession {
     private volatile String filePath;
     /** 输出目录（HLS 切片目录或下载目录） */
     private volatile String outputDir;
+    /** 下载文件大小（字节），-1 表示尚未确定，确定后不再反复查磁盘 */
+    private volatile long fileSize = -1;
+    private int fileConsumers;
+    private boolean fileCleanupStarted;
+
+    /** 成片排队、转码和上传期间保护已完成下载的文件。 */
+    public synchronized boolean retainFiles() {
+        if (fileCleanupStarted) {
+            return false;
+        }
+        fileConsumers++;
+        return true;
+    }
+
+    public synchronized void releaseFiles() {
+        if (fileConsumers <= 0) {
+            throw new IllegalStateException("录像文件使用计数不匹配");
+        }
+        fileConsumers--;
+    }
+
+    public synchronized boolean beginFileCleanup() {
+        if (fileConsumers > 0) {
+            return false;
+        }
+        fileCleanupStarted = true;
+        return true;
+    }
+
+    /** 已取得清理权；删除失败后仍需重试，不再等待文件保留期。 */
+    public synchronized boolean isFileCleanupStarted() {
+        return fileCleanupStarted;
+    }
 
     private volatile LocalDateTime startTime;
     private volatile LocalDateTime endTime;
     private volatile String error;
+    private volatile String rawFilePath;
+
+    public String getRawFilePath() { return rawFilePath; }
+    public void setRawFilePath(String rawFilePath) { this.rawFilePath = rawFilePath; }
 
     private volatile FfmpegProcess ffmpegProcess;
+    /** 下载码流里读到的首末帧绝对时间，用于验证业务时间区间。 */
+    private final HikStreamClock streamClock = new HikStreamClock();
     /** JNA 数据回调的强引用持有者 */
     private volatile Object dataCallback;
 
     private volatile long lastDataTime = System.currentTimeMillis();
-    private final AtomicLong bytesReceived = new AtomicLong(0);
+    /** 码流字节数。每包都会累加，用 LongAdder 降低多路回调线程写同一计数器时的竞争 */
+    private final LongAdder bytesReceived = new LongAdder();
+
+    /**
+     * 最后收包时间的刷新间隔（毫秒）。看护任务以秒为单位判定空闲，
+     * 无需每个码流包都写一次 volatile 字段。
+     */
+    private static final long LAST_DATA_REFRESH_MILLIS = 200;
 
     /** 保证同一 session 不会被重复 stop */
     private final AtomicBoolean stopRequested = new AtomicBoolean(false);
+    /** 正在创建/注册 native 资源的调用数。取消不能等待 SDK，但释放必须等这些调用返回。 */
+    private int nativeOperations;
+
+    public synchronized boolean tryBeginNativeOperation() {
+        if (isStopping() || isFinished()) {
+            return false;
+        }
+        nativeOperations++;
+        return true;
+    }
+
+    /** 检查取消、登记句柄和 callback 强引用必须是一个原子操作；SDK 调用在锁外执行。 */
+    public synchronized boolean tryBeginLinkRegistration(int handle, Object callback, Runnable hook) {
+        if (handle < 0 || linkHandle >= 0 || !tryBeginNativeOperation()) {
+            return false;
+        }
+        linkHandle = handle;
+        dataCallback = callback;
+        releaseHook = hook;
+        return true;
+    }
+
+    public synchronized boolean hasNativeOperations() {
+        return nativeOperations > 0;
+    }
+
+    /** 只能由 SessionManager 调用；最后一个调用返回后立即重试延迟的资源释放。 */
+    public synchronized boolean endNativeOperation() {
+        if (nativeOperations <= 0) {
+            throw new IllegalStateException("native 操作计数不匹配");
+        }
+        return --nativeOperations == 0;
+    }
+    /** 进入终态时唤醒等待方（出库同步等），避免固定间隔轮询 */
+    private final CountDownLatch terminalLatch = new CountDownLatch(1);
 
     /** 会话结束后执行的清理钩子（用于释放 newlink 回调里保存的 handle -> callback 引用） */
     private volatile Runnable releaseHook;
     private final AtomicBoolean releaseHookRun = new AtomicBoolean(false);
 
     public MediaSession(String sessionId, SessionType type, String deviceId, int channel) {
+        this(sessionId, type, deviceId, channel, null);
+    }
+
+    public MediaSession(String sessionId, SessionType type, String deviceId, int channel, DeviceInfo deviceConnection) {
         this.sessionId = sessionId;
         this.type = type;
         this.deviceId = deviceId;
         this.channel = channel;
         this.createdAt = LocalDateTime.now();
+        this.deviceConnection = deviceConnection;
+    }
+
+    @JsonIgnore
+    public DeviceInfo getDeviceConnection() {
+        return deviceConnection;
     }
 
     /**
@@ -88,9 +185,12 @@ public class MediaSession {
     }
 
     public void touchData(int len) {
-        lastDataTime = System.currentTimeMillis();
+        long now = System.currentTimeMillis();
+        if (now - lastDataTime >= LAST_DATA_REFRESH_MILLIS) {
+            lastDataTime = now;
+        }
         if (len > 0) {
-            bytesReceived.addAndGet(len);
+            bytesReceived.add(len);
         }
     }
 
@@ -118,13 +218,44 @@ public class MediaSession {
         return status;
     }
 
-    public void setStatus(SessionStatus status) {
+    public synchronized void setStatus(SessionStatus status) {
+        // 超时/取消一旦发布，迟到的首帧或收尾结果不能将任务重新置为运行/成功。
+        if (isFinished()) {
+            return;
+        }
         this.status = status;
         this.updatedAt = LocalDateTime.now();
+        if (isFinished()) {
+            terminalLatch.countDown();
+        }
+    }
+
+    /**
+     * 阻塞直到会话进入终态或超时。
+     *
+     * @return true 表示已终态，false 表示超时且仍未终态
+     */
+    public boolean awaitTerminal(long timeoutMs) throws InterruptedException {
+        if (isFinished()) {
+            return true;
+        }
+        if (timeoutMs <= 0) {
+            return isFinished();
+        }
+        if (terminalLatch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+            return true;
+        }
+        return isFinished();
     }
 
     public LocalDateTime getUpdatedAt() {
         return updatedAt;
+    }
+
+    public void setUpdatedAt(LocalDateTime updatedAt) {
+        if (updatedAt != null) {
+            this.updatedAt = updatedAt;
+        }
     }
 
     public int getLUserId() {
@@ -175,6 +306,14 @@ public class MediaSession {
         this.outputDir = outputDir;
     }
 
+    public long getFileSize() {
+        return fileSize;
+    }
+
+    public void setFileSize(long fileSize) {
+        this.fileSize = fileSize;
+    }
+
     public LocalDateTime getStartTime() {
         return startTime;
     }
@@ -207,6 +346,10 @@ public class MediaSession {
         this.ffmpegProcess = ffmpegProcess;
     }
 
+    public HikStreamClock streamClock() {
+        return streamClock;
+    }
+
     public Object getDataCallback() {
         return dataCallback;
     }
@@ -216,7 +359,15 @@ public class MediaSession {
     }
 
     public void setReleaseHook(Runnable releaseHook) {
+        Runnable previous = this.releaseHook;
         this.releaseHook = releaseHook;
+        if (previous != null && previous != releaseHook && !releaseHookRun.get()) {
+            try {
+                previous.run();
+            } catch (Exception ignored) {
+                // 旧钩子失败不影响挂上新钩子
+            }
+        }
     }
 
     /**
@@ -238,6 +389,6 @@ public class MediaSession {
     }
 
     public long getBytesReceived() {
-        return bytesReceived.get();
+        return bytesReceived.sum();
     }
 }

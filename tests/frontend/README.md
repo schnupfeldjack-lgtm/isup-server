@@ -6,7 +6,7 @@
 
 页面采用 JeecgBoot / Ant Design 风格的后台布局，不依赖 JeecgBoot 前端运行时。预览、回放、下载和会话操作继续调用现有接口，不修改 Java 服务或设备配置。
 
-API Key 默认保存在当前标签页的 sessionStorage；只有明确勾选「在此浏览器记住 API Key」才写入 localStorage。旧版已记住的 Key 继续兼容，可取消勾选后保存来清理持久值。浏览器存储并非安全保险箱，请勿在共享电脑上记住 Key。本页适合受控内网使用；接口鉴权、跨域、`/media/**` 的访问策略仍由后端和反向代理负责。
+API Key 默认保存在当前标签页的 sessionStorage；只有明确勾选「在此浏览器记住 API Key」才写入 localStorage。旧版已记住的 Key 继续兼容，可取消勾选后保存来清理持久值。浏览器存储并非安全保险箱，请勿在共享电脑上记住 Key。本页适合受控内网使用；API 由 `X-API-Key` 鉴权，播放器使用后端返回的短时效 `/media/{expires}/{signature}/...` 地址，不能再自行拼接裸媒体路径。
 
 ## 工具函数与请求层测试
 

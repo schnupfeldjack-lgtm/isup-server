@@ -38,19 +38,18 @@ public class PreviewDataCallback implements HCISUPStream.PREVIEW_DATA_CB {
             if (pPreviewCBMsg.pRecvdata == null || pPreviewCBMsg.dwDataLen <= 0) {
                 return;
             }
-            byte[] data = pPreviewCBMsg.pRecvdata.getByteArray(0, pPreviewCBMsg.dwDataLen);
-
+            int len = pPreviewCBMsg.dwDataLen;
             FfmpegProcess ffmpeg = session.getFfmpegProcess();
             if (ffmpeg != null) {
-                ffmpeg.write(data, 0, data.length);
+                ffmpeg.write(pPreviewCBMsg.pRecvdata, len);
             }
-            totalBytes += data.length;
-            session.touchData(data.length);
+            totalBytes += len;
+            session.touchData(len);
 
             if (!firstDataLogged) {
                 firstDataLogged = true;
                 log.info("预览首帧到达：operation=Preview, deviceId={}, channel={}, sessionId={}, handle={}, bytes={}",
-                        session.getDeviceId(), session.getChannel(), session.getSessionId(), iPreviewHandle, data.length);
+                        session.getDeviceId(), session.getChannel(), session.getSessionId(), iPreviewHandle, len);
             }
             if (session.getStatus() == SessionStatus.STARTING) {
                 session.setStatus(SessionStatus.RUNNING);

@@ -47,8 +47,9 @@ public class PreviewNewLinkCallback implements HCISUPStream.PREVIEW_NEWLINK_CB {
             if (session == null) {
                 // 兜底：按设备 + 通道匹配唯一待接流会话
                 session = sessionManager.findPendingByDeviceChannel(SessionType.PREVIEW, deviceId, channel);
-                if (session != null) {
-                    sessionManager.registerIsupSession(session, isupSessionId);
+                if (session != null && isupSessionId >= 0 && session.getIsupSessionId() >= 0
+                        && session.getIsupSessionId() != isupSessionId) {
+                    session = null;
                 }
             }
             if (session == null) {
@@ -57,30 +58,40 @@ public class PreviewNewLinkCallback implements HCISUPStream.PREVIEW_NEWLINK_CB {
                 return false;
             }
 
-            session.setLinkHandle(lPreviewHandle);
-
             PreviewDataCallback dataCallback = new PreviewDataCallback(session);
-            session.setDataCallback(dataCallback);
-            handlers.put(lPreviewHandle, dataCallback);
-            session.setReleaseHook(() -> handlers.remove(lPreviewHandle));
-
-            HCISUPStream.NET_EHOME_PREVIEW_DATA_CB_PARAM param = new HCISUPStream.NET_EHOME_PREVIEW_DATA_CB_PARAM();
-            param.fnPreviewDataCB = dataCallback;
-            param.write();
-
-            if (!sdkLoader.stream().NET_ESTREAM_SetPreviewDataCB(lPreviewHandle, param)) {
-                log.error("NET_ESTREAM_SetPreviewDataCB 失败：operation=PreviewNewLink, deviceId={}, channel={}, sessionId={}, handle={}, errorCode={}",
-                        session.getDeviceId(), session.getChannel(), session.getSessionId(), lPreviewHandle,
-                        sdkLoader.stream().NET_ESTREAM_GetLastError());
+            if (!session.tryBeginLinkRegistration(lPreviewHandle, dataCallback,
+                    () -> handlers.remove(lPreviewHandle, dataCallback))) {
                 return false;
             }
+            try {
+                handlers.put(lPreviewHandle, dataCallback);
+                sessionManager.registerIsupSession(session, isupSessionId);
 
-            if (session.getStatus() == SessionStatus.STARTING) {
-                session.setStatus(SessionStatus.RUNNING);
+                HCISUPStream.NET_EHOME_PREVIEW_DATA_CB_PARAM param = new HCISUPStream.NET_EHOME_PREVIEW_DATA_CB_PARAM();
+                param.fnPreviewDataCB = dataCallback;
+                param.write();
+
+                if (!sdkLoader.stream().NET_ESTREAM_SetPreviewDataCB(lPreviewHandle, param)) {
+                    log.error("NET_ESTREAM_SetPreviewDataCB 失败：operation=PreviewNewLink, deviceId={}, channel={}, sessionId={}, handle={}, errorCode={}",
+                            session.getDeviceId(), session.getChannel(), session.getSessionId(), lPreviewHandle,
+                            sdkLoader.stream().NET_ESTREAM_GetLastError());
+                    sessionManager.stopAsync(session, SessionStatus.FAILED, "注册预览数据回调失败");
+                    return false;
+                }
+
+                if (session.isStopping() || session.isFinished()) {
+                    return false;
+                }
+
+                if (session.getStatus() == SessionStatus.STARTING) {
+                    session.setStatus(SessionStatus.RUNNING);
+                }
+                log.info("预览链路已建立：deviceId={}, channel={}, sessionId={}, handle={}, isupSessionId={}",
+                        session.getDeviceId(), session.getChannel(), session.getSessionId(), lPreviewHandle, isupSessionId);
+                return true;
+            } finally {
+                sessionManager.endNativeOperation(session);
             }
-            log.info("预览链路已建立：deviceId={}, channel={}, sessionId={}, handle={}, isupSessionId={}",
-                    session.getDeviceId(), session.getChannel(), session.getSessionId(), lPreviewHandle, isupSessionId);
-            return true;
         } catch (Exception e) {
             log.error("处理预览新连接回调异常：handle={}", lPreviewHandle, e);
             return false;

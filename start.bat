@@ -1,28 +1,27 @@
 @echo off
-chcp 65001 >nul
 cd /d %~dp0
 
 rem ==========================================
-rem  ISUP Server Æô¶¯½Å±¾£¨Windows£©
-rem  ÅäÖÃÔÚ config/application.yml ÖÐÐÞ¸Ä
+rem  ISUP Server ï¿½ï¿½ï¿½ï¿½ï¿½Å±ï¿½ï¿½ï¿½Windowsï¿½ï¿½
+rem  ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ application-dev.yml ï¿½ï¿½ï¿½Þ¸ï¿½
 rem ==========================================
 
 if not exist "target\isup-server-1.0.0.jar" (
-    echo Î´ÕÒµ½ target\isup-server-1.0.0.jar
-    echo ÇëÏÈÖ´ÐÐ: mvn clean package -DskipTests
+    echo Î´ï¿½Òµï¿½ target\isup-server-1.0.0.jar
+    echo ï¿½ï¿½ï¿½ï¿½Ö´ï¿½ï¿½: mvn clean package -DskipTests
     pause
     exit /b 1
 )
 
 if not exist "sdk" (
-    echo [¾¯¸æ] Î´ÕÒµ½ sdk Ä¿Â¼£¬º£¿µ SDK Î´·ÅÖÃ£¬Éè±¸½«ÎÞ·¨×¢²á
-    echo Çë½« libHCISUPCMS.so / HCISUPCMS.dll µÈÎÄ¼þ·ÅÈë sdk\
+    echo [ï¿½ï¿½ï¿½ï¿½] Î´ï¿½Òµï¿½ sdk Ä¿Â¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ SDK Î´ï¿½ï¿½ï¿½Ã£ï¿½ï¿½è±¸ï¿½ï¿½ï¿½Þ·ï¿½×¢ï¿½ï¿½
+    echo ï¿½ë½« libHCISUPCMS.so / HCISUPCMS.dll ï¿½ï¿½ï¿½Ä¼ï¿½ï¿½ï¿½ï¿½ï¿½ sdk\
     echo.
 )
 
-echo Æô¶¯ ISUP Server...
-echo ÅäÖÃÎÄ¼þ: config\application.yml
-echo ½¡¿µ¼ì²é: http://127.0.0.1:8080/api/health
-java -jar target\isup-server-1.0.0.jar
+echo ï¿½ï¿½ï¿½ï¿½ ISUP Server...
+echo ï¿½ï¿½ï¿½ï¿½ï¿½Ä¼ï¿½: config\application.yml
+echo ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½: http://127.0.0.1:8080/api/health
+java -Xms2g -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=100 -jar target\isup-server-1.0.0.jar --spring.profiles.active=dev
 
 pause

@@ -27,6 +27,11 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
         <jna.version>5.17.0</jna.version>
+        <druid.version>1.2.24</druid.version>
+        <mysql.version>8.0.33</mysql.version>
+        <!-- 构建期决定：打进 jar 的 SDK 平台目录（win64 / linux64） -->
+        <native.platform>win64</native.platform>
+        <isup.build.directory>target</isup.build.directory>
     </properties>
 
     <dependencies>
@@ -42,11 +47,47 @@
             <artifactId>spring-boot-starter-validation</artifactId>
         </dependency>
 
+        <!-- JDBC：Druid 连接池依赖 spring-jdbc 的 DataSource 抽象 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
+        </dependency>
+
+        <!-- Druid 连接池（Spring Boot 3.x 自动配置：DruidDataSourceAutoConfigure） -->
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>druid-spring-boot-3-starter</artifactId>
+            <version>${druid.version}</version>
+        </dependency>
+
+        <!-- MySQL 驱动。换数据库时替换这里，并同步改 spring.datasource.driver-class-name。
+             不用 runtime scope：那样 IDEA 不会把它放进编译 classpath，
+             yml 里的 com.mysql.cj.jdbc.Driver 会报「无法解析类或软件包 mysql」 -->
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <version>${mysql.version}</version>
+        </dependency>
+
         <!-- JNA：调用海康 HCISUPCMS / HCISUPStream -->
         <dependency>
             <groupId>net.java.dev.jna</groupId>
             <artifactId>jna</artifactId>
             <version>${jna.version}</version>
+        </dependency>
+
+        <!-- 阿里云 OSS：出库录像上传 -->
+        <dependency>
+            <groupId>com.aliyun.oss</groupId>
+            <artifactId>aliyun-sdk-oss</artifactId>
+            <version>3.18.2</version>
+            <exclusions>
+                <!-- 统一使用 Spring 的 spring-jcl，避免重复 Commons Logging 实现。 -->
+                <exclusion>
+                    <groupId>commons-logging</groupId>
+                    <artifactId>commons-logging</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
 
         <!-- 测试 -->
@@ -58,7 +99,26 @@
     </dependencies>
 
     <build>
+        <directory>${isup.build.directory}</directory>
         <finalName>isup-server-${project.version}</finalName>
+        <resources>
+            <!-- 常规资源：不过滤，配置文件里不写任何占位符 -->
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>false</filtering>
+                <excludes>
+                    <exclude>native/**</exclude>
+                </excludes>
+            </resource>
+            <!-- 只把当前打包平台那一套 SDK 打进 jar（另一套不进包，省体积） -->
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>false</filtering>
+                <includes>
+                    <include>native/${native.platform}/**</include>
+                </includes>
+            </resource>
+        </resources>
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
@@ -66,4 +126,24 @@
             </plugin>
         </plugins>
     </build>
+
+    <!-- 打包平台：dev = Windows 本机，prod = Linux 生产。
+         只影响打进 jar 的那一套海康 SDK，不影响运行时的 spring.profiles.active -->
+    <profiles>
+        <profile>
+            <id>dev</id>
+            <activation>
+                <activeByDefault>true</activeByDefault>
+            </activation>
+            <properties>
+                <native.platform>win64</native.platform>
+            </properties>
+        </profile>
+        <profile>
+            <id>prod</id>
+            <properties>
+                <native.platform>linux64</native.platform>
+            </properties>
+        </profile>
+    </profiles>
 </project>
