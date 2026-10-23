@@ -17,7 +17,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
-/** Full decoding is acceptance testing only; the production processor copies packets. */
+/** Delivery copies encoded pictures; acceptance fully decodes without re-encoding the artifact. */
 class RecordingRemuxIntegrationTest {
     private static final LocalDateTime WALL = LocalDateTime.of(2026, 10, 15, 9, 0);
     private static final long ORIGIN = 5_300_000_000L;
@@ -64,6 +64,49 @@ class RecordingRemuxIntegrationTest {
         assertVideoOnly(result);
     }
 
+    @Test void completePesWithTruncatedH264TailCannotPassPacketDurationAsPlayableVideo() throws Exception {
+        Path complete = ps(false, false, false);
+        byte[] original = Files.readAllBytes(complete);
+        List<byte[]> frames = units(Files.readAllBytes(temp.resolve("source.h264")));
+        byte[] lastFrame = frames.getLast();
+        byte[] damagedFrame = Arrays.copyOf(lastFrame, Math.max(12, lastFrame.length / 2));
+        Path damaged = temp.resolve("complete-pes-bad-h264.ps");
+        try (var out = Files.newOutputStream(damaged)) {
+            out.write(original, 0, original.length - 4);
+            // PES length matches the bytes present: only the encoded H264 picture is incomplete.
+            out.write(PsRecordingTimelineTest.pesDts(0xe0, ORIGIN + 150 * 3600L,
+                    ORIGIN + 150 * 3600L, damagedFrame));
+            out.write(new byte[]{0, 0, 1, (byte) 0xb9});
+        }
+        byte[] before = Files.readAllBytes(damaged);
+        Path oldOutput = temp.resolve("old-packet-accepted.mp4");
+        run(List.of(ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-copyts", "-start_at_zero",
+                "-fflags", "+discardcorrupt", "-i", damaged.toString(), "-map", "0:v:0", "-c:v", "copy",
+                "-an", "-movflags", "+faststart", oldOutput.toString()));
+        String packetProgress = run(List.of(ffmpeg, "-hide_banner", "-loglevel", "error", "-i",
+                oldOutput.toString(), "-map", "0:v:0", "-c:v", "copy", "-progress", "pipe:1", "-f", "null", "-"));
+        long micros = packetProgress.lines().filter(line -> line.startsWith("out_time_us="))
+                .mapToLong(line -> Long.parseLong(line.substring("out_time_us=".length()))).max().orElseThrow();
+        assertTrue(packetProgress.contains("progress=end"));
+        assertTrue(micros >= 5_000_000 && micros <= 55_000_000,
+                "旧 copy 包扫描时长满足当前业务门槛：" + packetProgress);
+        var decodeFailure = assertThrows(java.io.IOException.class, () -> run(List.of(ffmpeg, "-hide_banner", "-loglevel", "error",
+                "-xerror", "-err_detect", "explode", "-threads", "1", "-i", oldOutput.toString(),
+                "-map", "0:v:0", "-an", "-threads", "1", "-fps_mode", "passthrough", "-enc_time_base", "demux", "-f", "null", "-")),
+                "样本必须真实包含可复现的 H264 解码错误");
+        assertTrue(decodeFailure.getMessage().contains("Error while decoding")
+                        || decodeFailure.getMessage().contains("error while decoding")
+                        || decodeFailure.getMessage().contains("error decoding")
+                        || decodeFailure.getMessage().contains("decode_slice_header error")
+                        || decodeFailure.getMessage().contains("bytestream"),
+                "必须是媒体解码失败而非命令或环境错误：" + decodeFailure.getMessage());
+
+        assertThrows(java.io.IOException.class, () -> remux(damaged));
+
+        assertArrayEquals(before, Files.readAllBytes(damaged), "拒绝成片不能修改原始证据");
+        assertFalse(Files.exists(temp.resolve("recording-playable.mp4")), "坏成片须清理");
+    }
+
     @Test void compatibleAacIsAlsoOmittedWhileH264PicturesRemainUnchanged() throws Exception {
         Path source = temp.resolve("aac.mp4");
         run(List.of(ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
@@ -74,6 +117,96 @@ class RecordingRemuxIntegrationTest {
         assertEquals(decodedHashes(source), decodedHashes(result));
         assertVideoOnly(result);
         assertArrayEquals(before, Files.readAllBytes(source));
+    }
+
+    private Path repairableSource() throws Exception {
+        ps(false, false, false);
+        List<byte[]> frames = units(Files.readAllBytes(temp.resolve("source.h264")));
+        Path reference = temp.resolve("anchored-reference.ps");
+        try (var out = Files.newOutputStream(reference)) {
+            out.write(PsRecordingTimelineTest.pack());
+            for (int i = 0; i < frames.size() - 1; i++) {
+                if (i % 25 == 0) out.write(PsRecordingTimelineTest.psm(WALL.plusSeconds(i / 25)));
+                out.write(PsRecordingTimelineTest.pesDts(0xe0, ORIGIN + i * 3600L, ORIGIN + i * 3600L, frames.get(i)));
+            }
+        }
+        byte[] frame = frames.getLast();
+        int slice = -1;
+        for (int i = 0; i + 4 < frame.length; i++) {
+            if (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 1 && (frame[i + 3] & 31) == 1) {
+                slice = i; break;
+            }
+        }
+        assertTrue(slice >= 0);
+        byte[] nal = Arrays.copyOfRange(frame, slice, frame.length);
+        assertTrue(nal.length > 40);
+        Path source = temp.resolve("truncated-continuation.ps");
+        try (var out = Files.newOutputStream(source)) {
+            out.write(Files.readAllBytes(reference));
+            out.write(PsRecordingTimelineTest.pesDts(0xe0, ORIGIN + 149 * 3600L,
+                    ORIGIN + 149 * 3600L, Arrays.copyOf(nal, nal.length / 2)));
+            byte[] continuation = PsRecordingDuplicateAccessUnitTest.untimedPes(0xe0,
+                    Arrays.copyOfRange(nal, nal.length / 2, nal.length));
+            out.write(continuation, 0, 10); // Valid PES header plus partial slice; actual EOF omits remaining bytes.
+        }
+        return source;
+    }
+
+    @Test void provenBusinessExternalWholeAuRepairPreservesEveryCompleteSourcePicture() throws Exception {
+        Path source = repairableSource();
+        byte[] before = Files.readAllBytes(source);
+        var rawError = assertThrows(java.io.IOException.class, () -> run(List.of(ffmpeg, "-hide_banner", "-loglevel", "error",
+                "-xerror", "-err_detect", "explode", "-threads", "1", "-i", source.toString(), "-an", "-f", "null", "-")));
+        assertTrue(rawError.getMessage().contains("bytestream") || rawError.getMessage().contains("error while decoding"), rawError.getMessage());
+        Path result = remux(source);
+        assertEquals(decodedHashes(temp.resolve("anchored-reference.ps")), decodedHashes(result), "Only the proven business-external incomplete AU may be removed");
+        assertArrayEquals(before, Files.readAllBytes(source));
+        try (var files = Files.list(temp)) { assertTrue(files.noneMatch(p -> p.getFileName().toString().startsWith("recording-tail-"))); }
+    }
+
+    @Test void secondDecodeFailureHasNoFurtherRepairAndCleansOutputAndPrefix() throws Exception {
+        Path source = repairableSource();
+        byte[] original = Files.readAllBytes(source);
+        java.io.IOException second = new java.io.IOException("命令失败 exit=183 [h264 @ test] bytestream -5");
+        assertOneShotFailure(source, second, false);
+        assertArrayEquals(original, Files.readAllBytes(source));
+    }
+
+    @Test void secondDecodeTimeoutKeepsOriginalAndCleansArtifacts() throws Exception {
+        Path source = repairableSource();
+        byte[] original = Files.readAllBytes(source);
+        assertOneShotFailure(source, new java.net.SocketTimeoutException("shared processing deadline"), false);
+        assertArrayEquals(original, Files.readAllBytes(source));
+    }
+
+    @Test void sameSizeOriginalMutationAfterRepairRemuxPreventsSuccess() throws Exception {
+        assertOneShotFailure(repairableSource(), null, true);
+    }
+
+    private void assertOneShotFailure(Path source, java.io.IOException second, boolean mutate) throws Exception {
+        IsupProperties properties = new IsupProperties(); properties.setFfmpegPath(ffmpeg);
+        MediaSession session = new MediaSession("one-shot-failure", SessionType.DOWNLOAD, "fixture", 1);
+        session.setRawFilePath(source.toString()); session.setStartTime(WALL.minusSeconds(5)); session.setEndTime(WALL.plusSeconds(20));
+        long deadline = RecordingDeadline.afterSeconds(30);
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        RecordingRemuxer remuxer = new RecordingRemuxer(properties, (command, actualDeadline, parent) -> {
+            assertEquals(deadline, actualDeadline);
+            int call = calls.incrementAndGet();
+            assertTrue(call <= 4, "No third attempt");
+            if (call == 4 && second != null) throw second;
+            String result = ExactDurationTrimmer.runUntil(command, actualDeadline, parent);
+            if (call == 3 && mutate) {
+                byte[] bytes = Files.readAllBytes(source); bytes[bytes.length - 1] ^= 1; Files.write(source, bytes);
+            }
+            return result;
+        });
+        var failure = assertThrows(java.io.IOException.class, () -> remuxer.remux(session, WALL, WALL.plusSeconds(5), deadline));
+        if (second != null) assertSame(second, failure);
+        assertEquals(4, calls.get());
+        assertEquals(1, failure.getSuppressed().length, "The initial strict decode failure remains available");
+        assertTrue(RecordingRemuxer.isCodecFailure((java.io.IOException) failure.getSuppressed()[0]));
+        assertFalse(Files.exists(temp.resolve("recording-playable.mp4")));
+        try (var files = Files.list(temp)) { assertTrue(files.noneMatch(p -> p.getFileName().toString().startsWith("recording-tail-"))); }
     }
 
     private Path remux(Path source) throws Exception {

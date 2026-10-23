@@ -2,6 +2,8 @@ package com.hiki.isup.controller;
 
 import com.hiki.isup.model.response.ErrorResponse;
 import com.hiki.isup.service.WaybillVideoSyncService;
+import com.hiki.isup.service.RecordingRecoveryService;
+import org.springframework.beans.factory.annotation.Autowired;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
@@ -16,11 +18,17 @@ import java.util.Map;
 @RequestMapping("/api/v1/recordings")
 public class RecordingOperationsController {
     private final WaybillVideoSyncService service;
+    @Autowired
+    private RecordingRecoveryService recoveryService;
 
     public RecordingOperationsController(WaybillVideoSyncService service) { this.service = service; }
 
     @GetMapping("/diagnostics")
-    public Map<String, Object> diagnostics() { return service.diagnostics(); }
+    public Map<String, Object> diagnostics() {
+        Map<String, Object> result = service.diagnostics();
+        if (recoveryService != null) result.put("recovery", recoveryService.diagnostics());
+        return result;
+    }
 
     @GetMapping("/retries/{id}")
     public Object retry(@PathVariable String id) throws IOException { return service.inspectRetry(id); }

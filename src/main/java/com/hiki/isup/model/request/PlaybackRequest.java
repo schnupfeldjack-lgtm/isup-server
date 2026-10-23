@@ -33,6 +33,12 @@ public class PlaybackRequest {
     /** 链路模式：0-TCP，1-UDP，2-HRUDP；不传则使用全局配置 isup.link-mode */
     private Integer linkMode;
 
+    /** ERP 按需观看租约，旧调试调用默认不启用。 */
+    private boolean viewerLease;
+
+    public boolean isViewerLease() { return viewerLease; }
+    public void setViewerLease(boolean viewerLease) { this.viewerLease = viewerLease; }
+
     public String getDeviceId() {
         return deviceId;
     }

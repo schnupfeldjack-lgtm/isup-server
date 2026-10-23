@@ -51,6 +51,38 @@ public class WaybillVideoRepository {
         return jdbcTemplate.query(sql, ROW_MAPPER, WaybillVideoStatus.PENDING.name(), limit);
     }
 
+    public List<WaybillVideoRecord> findCurrentDayPending(LocalDateTime dayStart, LocalDateTime nextDay, int limit) {
+        String sql = "SELECT id, outbound_waybill_id, waybill_id, start_time, end_time, status, "
+                + "channel_code, video_url1, video_url2 FROM " + table
+                + " WHERE status = ? AND channel_code IS NOT NULL AND TRIM(channel_code) <> ''"
+                + " AND start_time >= ? AND start_time < ? ORDER BY create_time ASC, id ASC LIMIT ?";
+        return jdbcTemplate.query(sql, ROW_MAPPER, WaybillVideoStatus.PENDING.name(),
+                Timestamp.valueOf(dayStart), Timestamp.valueOf(nextDay), limit);
+    }
+
+    public List<WaybillVideoRecord> findHistoricalPending(LocalDateTime dayStart, int limit) {
+        String sql = "SELECT id, outbound_waybill_id, waybill_id, start_time, end_time, status, "
+                + "channel_code, video_url1, video_url2 FROM " + table
+                + " WHERE status = ? AND channel_code IS NOT NULL AND TRIM(channel_code) <> ''"
+                + " AND (start_time < ? OR start_time IS NULL) ORDER BY create_time ASC, id ASC LIMIT ?";
+        return jdbcTemplate.query(sql, ROW_MAPPER, WaybillVideoStatus.PENDING.name(), Timestamp.valueOf(dayStart), limit);
+    }
+
+    /** 优先行仍须为 PENDING；最多 {@value IsupProperties.WaybillVideo#MAX_PRIORITY_IDS} 个去重 ID，所有值均参数绑定。 */
+    public List<WaybillVideoRecord> findPriorityPending(List<String> priorityIds) {
+        List<String> ids = IsupProperties.WaybillVideo.validatePriorityIds(priorityIds);
+        if (ids.isEmpty()) return List.of();
+        String placeholders = String.join(", ", java.util.Collections.nCopies(ids.size(), "?"));
+        String sql = "SELECT id, outbound_waybill_id, waybill_id, start_time, end_time, status, "
+                + "channel_code, video_url1, video_url2 FROM " + table
+                + " WHERE status = ? AND channel_code IS NOT NULL AND TRIM(channel_code) <> ''"
+                + " AND id IN (" + placeholders + ") ORDER BY create_time ASC, id ASC";
+        java.util.ArrayList<Object> parameters = new java.util.ArrayList<>();
+        parameters.add(WaybillVideoStatus.PENDING.name());
+        parameters.addAll(ids);
+        return jdbcTemplate.query(sql, ROW_MAPPER, parameters.toArray());
+    }
+
     /** 人工恢复前只读核对当前业务快照；不在此处领取或恢复任务。 */
     public WaybillVideoRecord findById(String id) {
         String sql = "SELECT id, outbound_waybill_id, waybill_id, start_time, end_time, status, "

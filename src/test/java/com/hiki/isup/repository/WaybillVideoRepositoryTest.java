@@ -32,6 +32,122 @@ import static org.mockito.Mockito.lenient;
 @ExtendWith(MockitoExtension.class)
 class WaybillVideoRepositoryTest {
 
+    @Test void fairQueriesAreReadOnlyBoundedAndBindTheSameDayBoundary() {
+        var day = java.time.LocalDate.of(2026,10,21).atStartOfDay();
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(repository,"findCurrentDayPending",day,day.plusDays(1),5);
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(repository,"findHistoricalPending",day,5);
+        var calls=org.mockito.Mockito.mockingDetails(jdbcTemplate).getInvocations().stream()
+                .filter(i->i.getMethod().getName().equals("query")).toList();
+        assertEquals(2,calls.size());
+        String today=calls.get(0).getArgument(0), history=calls.get(1).getArgument(0);
+        assertTrue(today.contains("start_time >= ? AND start_time < ?"));
+        assertTrue(history.contains("(start_time < ? OR start_time IS NULL)"));
+        for (var call:calls) {
+            String sql=call.getArgument(0);
+            assertTrue(sql.contains("status = ? AND channel_code IS NOT NULL AND TRIM(channel_code) <> ''"));
+            assertTrue(sql.endsWith("ORDER BY create_time ASC, id ASC LIMIT ?"));
+            assertEquals("PENDING",call.getArgument(2));
+            assertEquals(java.sql.Timestamp.valueOf(day),call.getArgument(3));
+            assertEquals(5,call.getArguments()[call.getArguments().length-1]);
+        }
+        assertEquals(java.sql.Timestamp.valueOf(day.plusDays(1)),calls.get(0).getArgument(4));
+        assertFalse(org.mockito.Mockito.mockingDetails(jdbcTemplate).getInvocations().stream().anyMatch(i->i.getMethod().getName().equals("update")));
+    }
+
+    @Test
+    void priorityIdsDefaultEmptyAndRejectUnboundedOrMalformedConfiguration() {
+        IsupProperties.WaybillVideo settings = new IsupProperties.WaybillVideo();
+        assertEquals(List.of(), org.junit.jupiter.api.Assertions.assertDoesNotThrow(() ->
+                org.springframework.test.util.ReflectionTestUtils.invokeMethod(settings, "getPriorityIds")));
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(settings, "setPriorityIds",
+                List.of(" 2110012345678901234 ", "id-2", "2110012345678901234"));
+        assertEquals(List.of("2110012345678901234", "id-2"),
+                org.springframework.test.util.ReflectionTestUtils.invokeMethod(settings, "getPriorityIds"));
+        for (List<String> invalid : List.of(List.of("x' OR 1=1"), List.of(""), List.of("a".repeat(65)),
+                java.util.stream.IntStream.range(0, 257).mapToObj(i -> "id-" + i).toList())) {
+            org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, () ->
+                    org.springframework.test.util.ReflectionTestUtils.invokeMethod(settings, "setPriorityIds", invalid));
+        }
+    }
+
+    @Test
+    void priorityIdsAcceptAll209ExplicitExistingJobIds() {
+        IsupProperties.WaybillVideo settings = new IsupProperties.WaybillVideo();
+        List<String> ids = java.util.stream.LongStream.range(2110012345678901000L, 2110012345678901209L)
+                .mapToObj(Long::toString).toList();
+        org.junit.jupiter.api.Assertions.assertDoesNotThrow(() -> settings.setPriorityIds(ids));
+        assertEquals(ids, settings.getPriorityIds());
+    }
+
+    @Test
+    void priorityIdLimitAppliesAfterTrimmingAndDeduplication() {
+        IsupProperties.WaybillVideo settings = new IsupProperties.WaybillVideo();
+        List<String> distinct = java.util.stream.IntStream.range(0, 256).mapToObj(i -> "id-" + i).toList();
+        List<String> repeated = distinct.stream().flatMap(id -> java.util.stream.Stream.of(id, " " + id + " "))
+                .toList();
+        org.junit.jupiter.api.Assertions.assertDoesNotThrow(() -> settings.setPriorityIds(repeated));
+        assertEquals(distinct, settings.getPriorityIds());
+        List<String> tooMany = new java.util.ArrayList<>(repeated);
+        tooMany.add("id-256");
+        IllegalArgumentException error = org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalArgumentException.class, () -> settings.setPriorityIds(tooMany));
+        assertTrue(error.getMessage().contains("at most 256 distinct IDs"));
+        assertEquals(distinct, settings.getPriorityIds(), "Rejected configuration must preserve the prior bounded list");
+    }
+
+    @Test
+    void priorityQueryBindsAll209ExplicitIdsAndRejects257BeforeQuery() {
+        List<String> ids = java.util.stream.LongStream.range(2110012345678901000L, 2110012345678901209L)
+                .mapToObj(Long::toString).toList();
+        org.junit.jupiter.api.Assertions.assertDoesNotThrow(() -> repository.findPriorityPending(ids));
+        var calls = org.mockito.Mockito.mockingDetails(jdbcTemplate).getInvocations().stream()
+                .filter(inv -> inv.getMethod().getName().equals("query")).toList();
+        assertEquals(1, calls.size());
+        var call = calls.getFirst();
+        String sql = call.getArgument(0);
+        assertTrue(sql.contains("WHERE status = ?"));
+        assertTrue(sql.contains("channel_code IS NOT NULL AND TRIM(channel_code) <> ''"));
+        assertTrue(sql.contains("id IN (" + String.join(", ", java.util.Collections.nCopies(209, "?")) + ")"));
+        assertFalse(sql.contains(ids.getFirst()));
+        assertEquals("PENDING", call.getArgument(2));
+        assertEquals(ids, java.util.Arrays.asList(call.getArguments()).subList(3, call.getArguments().length));
+        List<String> tooMany = java.util.stream.IntStream.range(0, 257).mapToObj(i -> "id-" + i).toList();
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> repository.findPriorityPending(tooMany));
+        assertEquals(1L, org.mockito.Mockito.mockingDetails(jdbcTemplate).getInvocations().stream()
+                .filter(inv -> inv.getMethod().getName().equals("query")).count());
+    }
+
+    @Test
+    void priorityQueryBindsDistinctIdsAndReadsOnlyPendingWithChannels() {
+        org.junit.jupiter.api.Assertions.assertDoesNotThrow(() ->
+                org.springframework.test.util.ReflectionTestUtils.invokeMethod(repository, "findPriorityPending",
+                        List.of("2110012345678901234", "id-2", "id-2")));
+        var call = org.mockito.Mockito.mockingDetails(jdbcTemplate).getInvocations().stream()
+                .filter(inv -> inv.getMethod().getName().equals("query")).findFirst().orElseThrow();
+        String sql = call.getArgument(0);
+        assertTrue(sql.contains("WHERE status = ?"));
+        assertTrue(sql.contains("channel_code IS NOT NULL AND TRIM(channel_code) <> ''"));
+        assertTrue(sql.contains("id IN (?, ?)"));
+        assertTrue(sql.endsWith("ORDER BY create_time ASC, id ASC"));
+        assertFalse(sql.contains("2110012345678901234"));
+        assertEquals(List.of("PENDING", "2110012345678901234", "id-2"),
+                java.util.Arrays.asList(call.getArguments()).subList(2, call.getArguments().length));
+        assertFalse(org.mockito.Mockito.mockingDetails(jdbcTemplate).getInvocations().stream()
+                .anyMatch(inv -> inv.getMethod().getName().equals("update")));
+    }
+
+    @Test
+    void emptyPriorityListDoesNotQueryDatabaseAndInvalidListFailsBeforeQuery() {
+        assertEquals(List.of(), org.junit.jupiter.api.Assertions.assertDoesNotThrow(() ->
+                org.springframework.test.util.ReflectionTestUtils.invokeMethod(repository, "findPriorityPending", List.of())));
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, () ->
+                org.springframework.test.util.ReflectionTestUtils.invokeMethod(repository, "findPriorityPending",
+                        List.of("invalid'")));
+        assertFalse(org.mockito.Mockito.mockingDetails(jdbcTemplate).getInvocations().stream()
+                .anyMatch(inv -> inv.getMethod().getName().equals("query") || inv.getMethod().getName().equals("update")));
+    }
+
     @Test
     void snapshotWritesBindBusinessFieldsAndBothPriorUrls() {
         com.hiki.isup.model.WaybillVideoRecord row = new com.hiki.isup.model.WaybillVideoRecord();

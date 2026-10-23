@@ -41,6 +41,7 @@ import java.util.concurrent.FutureTask;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
@@ -69,6 +70,7 @@ public class WaybillVideoSyncService implements AutoCloseable {
     private final ChannelService channelService;
     private final DeviceRegistry deviceRegistry;
     private final RecordingRemuxer recordingRemuxer;
+    private RecordingBoundaryGuard recordingBoundaryGuard;
     private final LongSupplier nanoTime;
     private final ExecutorService workers;
     private final int workerCount;
@@ -84,6 +86,8 @@ public class WaybillVideoSyncService implements AutoCloseable {
     private volatile String lastError;
     private volatile QueueSample queueSample;
     private volatile RunStatistics currentRound;
+    private final PendingVideoScheduler pendingScheduler = new PendingVideoScheduler();
+    private java.time.LocalDate sampledDay;
 
     @Autowired
     public WaybillVideoSyncService(IsupProperties properties,
@@ -125,6 +129,12 @@ public class WaybillVideoSyncService implements AutoCloseable {
     }
 
     public void syncOnce() {
+        // 按需播放模式：固定禁用；外部 enabled=true 也不能重新扫表或生成 OSS 文件。
+        log.debug("自动录像同步已停用，使用按需回放");
+    }
+
+    /** 仅保留历史实现，无调度或人工入口。 */
+    private void legacySyncOnce() {
         synchronized (controlLock) {
             if (closing || running) return;
             running = true;
@@ -139,6 +149,23 @@ public class WaybillVideoSyncService implements AutoCloseable {
         } finally {
             lastRoundFinishedAt = LocalDateTime.now();
             running = false;
+        }
+    }
+
+    @Autowired
+    void setRecordingBoundaryGuard(RecordingBoundaryGuard recordingBoundaryGuard) {
+        this.recordingBoundaryGuard = recordingBoundaryGuard;
+    }
+
+    /** 与定时领取和人工恢复共用入口锁，空闲后才允许整进程恢复。 */
+    public boolean prepareProcessRecovery(long minimumCleanupAgeMillis, BooleanSupplier authorize) {
+        synchronized (controlLock) {
+            ThreadPoolExecutor pool = (ThreadPoolExecutor) workers;
+            if (running || closing || pool.getActiveCount() != 0 || !pool.getQueue().isEmpty()
+                    || !sessionManager.canRecoverProcess(minimumCleanupAgeMillis)) return false;
+            if (!authorize.getAsBoolean() || !sessionManager.prepareProcessRecovery(minimumCleanupAgeMillis)) return false;
+            closing = true;
+            return true;
         }
     }
 
@@ -298,6 +325,7 @@ public class WaybillVideoSyncService implements AutoCloseable {
         int batchSize = properties.getWaybillVideo().getBatchSize();
         int window = rowConcurrency <= 1 ? 1 : Math.min(batchSize, workerCount);
         Deque<WaybillVideoRecord> candidates = new ArrayDeque<>(firstBatch);
+        java.time.LocalDate candidateDay = sampledDay;
         Set<String> submittedIds = new HashSet<>();
         Set<RowTask> inFlight = new LinkedHashSet<>();
         BlockingQueue<RowTask> completed = new LinkedBlockingQueue<>();
@@ -313,15 +341,25 @@ public class WaybillVideoSyncService implements AutoCloseable {
                     try {
                         while (inFlight.size() < window && !closing && !retryUnavailable
                                 && !sessionManager.recordingAdmissionBlocked() && !deadlineReached(deadlineNanos)) {
+                            if (properties.getWaybillVideo().isFairSchedulingEnabled()
+                                    && !java.util.Objects.equals(candidateDay, pendingScheduler.today())) {
+                                candidates.clear(); // 午夜后，未提交的昨天批次重新分类。
+                            }
                             if (candidates.isEmpty()) {
-                                for (WaybillVideoRecord row : samplePending()) {
+                                for (WaybillVideoRecord row : samplePending(submittedIds)) {
                                     if (!submittedIds.contains(row.getId())) {
                                         candidates.addLast(row);
                                     }
                                 }
+                                candidateDay = sampledDay;
                                 if (candidates.isEmpty()) {
                                     break;
                                 }
+                            }
+                            if (properties.getWaybillVideo().isFairSchedulingEnabled()
+                                    && !java.util.Objects.equals(candidateDay, pendingScheduler.today())) {
+                                candidates.clear();
+                                continue; // 数据库查询本身跨过午夜时也必须重新采样。
                             }
                             WaybillVideoRecord row = candidates.removeFirst();
                             if (!submittedIds.add(row.getId())) {
@@ -331,6 +369,7 @@ public class WaybillVideoSyncService implements AutoCloseable {
                             RowTask task = new RowTask(() -> processRowWithStatistics(row, deviceId,
                                     deviceChannels, channels, downloadSlots, rowDeadline, statistics), completed, statistics);
                             workers.execute(task);
+                            if (properties.getWaybillVideo().isFairSchedulingEnabled()) pendingScheduler.submitted(row);
                             statistics.submitted();
                             inFlight.add(task);
                         }
@@ -531,23 +570,54 @@ public class WaybillVideoSyncService implements AutoCloseable {
     }
 
     private List<WaybillVideoRecord> samplePending() {
+        return samplePending(Set.of());
+    }
+
+    private List<WaybillVideoRecord> samplePending(Set<String> excluded) {
         int limit = properties.getWaybillVideo().getBatchSize();
-        List<WaybillVideoRecord> rows = repository.findPending(limit);
+        List<String> priorityIds = properties.getWaybillVideo().getPriorityIds();
+        List<WaybillVideoRecord> rows;
+        if (properties.getWaybillVideo().isFairSchedulingEnabled()) {
+            sampledDay = pendingScheduler.today();
+            LocalDateTime dayStart = sampledDay.atStartOfDay();
+            // 将来日期暂不领取；按北京时间的同一日界划分两侧，不能使用数据库会话时区。
+            rows = pendingScheduler.select(sampledDay,
+                    repository.findCurrentDayPending(dayStart, dayStart.plusDays(1), limit),
+                    repository.findHistoricalPending(dayStart, limit), limit, excluded);
+        } else if (priorityIds.isEmpty()) {
+            rows = repository.findPending(limit);
+        } else {
+            // 普通批次仍参与本轮；优先行处于退避、隔离或已提交时，不阻塞后续普通行。
+            java.util.LinkedHashMap<String, WaybillVideoRecord> candidates = new java.util.LinkedHashMap<>();
+            for (WaybillVideoRecord row : repository.findPriorityPending(priorityIds)) {
+                candidates.putIfAbsent(row.getId(), row);
+            }
+            for (WaybillVideoRecord row : repository.findPending(limit)) {
+                candidates.putIfAbsent(row.getId(), row);
+            }
+            rows = new ArrayList<>(candidates.values());
+        }
         LocalDateTime oldest = rows.stream().map(WaybillVideoRecord::getEndTime)
                 .filter(java.util.Objects::nonNull).min(LocalDateTime::compareTo).orElse(null);
-        queueSample = new QueueSample(true, limit, rows.size(), rows.size() >= limit, oldest, LocalDateTime.now());
+        int sampleLimit = properties.getWaybillVideo().isFairSchedulingEnabled() ? limit : limit + priorityIds.size();
+        queueSample = new QueueSample(true, sampleLimit, rows.size(), rows.size() >= limit, oldest, LocalDateTime.now());
         return rows;
     }
 
     /** 不触发数据库、SDK、迁移或重试；积压是最近一次有界抽样，不冒充总量。 */
     public java.util.Map<String, Object> diagnostics() {
         java.util.Map<String, Object> result = new java.util.LinkedHashMap<>();
-        result.put("enabled", properties.getWaybillVideo().isEnabled());
+        result.put("enabled", false);
+        result.put("configuredEnabled", properties.getWaybillVideo().isEnabled());
+        result.put("mode", "ON_DEMAND_PLAYBACK");
         result.put("running", running);
         result.put("resources", sessionManager.resourceSnapshot());
+        result.put("cleanup", sessionManager.cleanupSnapshot());
         result.put("admissionBlocked", sessionManager.recordingAdmissionBlocked() || retryUnavailable);
         result.put("queue", queueSample == null
                 ? new QueueSample(false, properties.getWaybillVideo().getBatchSize(), 0, false, null, null) : queueSample);
+        result.put("scheduling", properties.getWaybillVideo().isFairSchedulingEnabled()
+                ? pendingScheduler.snapshot() : java.util.Map.of("mode", "LEGACY_FIFO_WITH_EXPLICIT_IDS"));
         result.put("lastRoundStartedAt", lastRoundStartedAt);
         result.put("lastRoundFinishedAt", lastRoundFinishedAt);
         result.put("lastSuccessAt", lastSuccessAt);
@@ -578,6 +648,11 @@ public class WaybillVideoSyncService implements AutoCloseable {
 
     /** 只授予下一轮一次重试，版本核对和审计持久化一起完成；不直接改订单或调用设备。 */
     public Object releaseRetry(String id, String revision, String fingerprint, String reason) throws IOException {
+        throw new RecoveryConflictException("自动录像同步及补偿已停用，请使用按需回放");
+    }
+
+    /** 仅保留历史审计实现，不再接受人工释放。 */
+    private Object legacyReleaseRetry(String id, String revision, String fingerprint, String reason) throws IOException {
         synchronized (controlLock) {
             if (running || closing) throw new RecoveryConflictException("同步正在执行或关闭，请等待本轮结束后再核对恢复");
             RecordingRetryPolicy current = retryPolicy;
@@ -862,6 +937,17 @@ public class WaybillVideoSyncService implements AutoCloseable {
         String start = WALL_CLOCK.format(downloadStart);
         String end = WALL_CLOCK.format(downloadEnd);
         TimeRange.validate(start, end);
+        String guardedDevice = properties.getWaybillVideo().getBoundaryGuardDevice();
+        if (!guardedDevice.isEmpty() && guardedDevice.equals(deviceId)) {
+            if (recordingBoundaryGuard == null) {
+                throw new IOException("录像文件边界保护已启用，但保护服务不可用");
+            }
+            RecordingDeadline.check(deadlineNanos);
+            downloadEnd = recordingBoundaryGuard.safeEnd(deviceId, deviceChannel,
+                    downloadStart, downloadEnd, deadlineNanos);
+            end = WALL_CLOCK.format(downloadEnd);
+            TimeRange.validate(start, end);
+        }
 
         DownloadRequest request = new DownloadRequest();
         request.setDeviceId(deviceId);

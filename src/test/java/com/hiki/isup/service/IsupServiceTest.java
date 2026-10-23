@@ -68,7 +68,9 @@ class IsupServiceTest {
         NativeSdkLoader loader = mock(NativeSdkLoader.class);
         HCISUPCMS cms = mock(HCISUPCMS.class);
         when(loader.cms()).thenReturn(cms);
+        when(cms.NET_ECMS_SetExceptionCallBack(anyInt(), any(), any(), any())).thenReturn(true);
         when(loader.stream()).thenReturn(mock(HCISUPStream.class));
+        when(loader.stream().NET_ESTREAM_SetExceptionCallBack(anyInt(), any(), any(), any())).thenReturn(true);
         when(cms.NET_ECMS_StartListen(any())).thenAnswer(invocation -> {
             HCISUPCMS.NET_EHOME_CMS_LISTEN_PARAM params = invocation.getArgument(0);
             params.read();
@@ -84,6 +86,11 @@ class IsupServiceTest {
 
         service.start();
 
-        verify(cms).NET_ECMS_StartListen(any());
+        org.junit.jupiter.api.Assertions.assertTrue(mockingDetails(loader.stream()).getInvocations().stream()
+                .anyMatch(invocation -> invocation.getMethod().getName().equals("NET_ESTREAM_SetExceptionCallBack")),
+                "Playback exceptions originate in SMS, not CMS");
+        org.mockito.InOrder registrationOrder = inOrder(cms);
+        registrationOrder.verify(cms).NET_ECMS_SetExceptionCallBack(eq(0), isNull(), any(), isNull());
+        registrationOrder.verify(cms).NET_ECMS_StartListen(any());
     }
 }

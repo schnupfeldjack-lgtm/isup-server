@@ -15,7 +15,7 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
 
-/** 保留设备视频编码，只转换 MP4 封装并检查片段基本可用性。 */
+/** 保留设备视频编码，只转换 MP4 封装，再完整解码验证交付成片。 */
 @Service
 public class RecordingRemuxer {
     private static final Logger log = LoggerFactory.getLogger(RecordingRemuxer.class);
@@ -61,9 +61,26 @@ public class RecordingRemuxer {
             }
             requireUsableFile(output, "封装成片");
             ExactDurationTrimmer.checkProcessingBudget(deadlineNanos, source.getParent());
-            String progress = runner.run(List.of(properties.getFfmpegPath(), "-hide_banner", "-loglevel", "error",
-                    "-nostdin", "-nostats", "-i", output.toString(), "-map", "0:v:0", "-c:v", "copy",
-                    "-progress", "pipe:1", "-f", "null", "-"), deadlineNanos, source.getParent());
+            String progress;
+            try {
+                progress = decode(output, deadlineNanos);
+            } catch (IOException firstDecodeFailure) {
+                if (!isCodecFailure(firstDecodeFailure)) throw firstDecodeFailure;
+                // Exactly one conditional retry, solely after failure of the delivered MP4's strict decode.
+                // Ordinary clean video never requires HK metadata or source-side repair.
+                try (RecordingTailRepair.Prepared candidate = RecordingTailRepair.prepare(
+                        properties.getFfmpegPath(), source, start, end, deadlineNanos)) {
+                    Files.deleteIfExists(output);
+                    runner.run(remuxCommand(candidate.path(), output), deadlineNanos, source.getParent());
+                    requireUsableFile(output, "末 AU 补救成片");
+                    progress = decode(output, deadlineNanos);
+                    candidate.verifySource();
+                    log.info("经业务覆盖证明排除不完整末 AU：sessionId={}, channel={}", session.getSessionId(), session.getChannel());
+                } catch (IOException | RuntimeException repairFailure) {
+                    repairFailure.addSuppressed(firstDecodeFailure);
+                    throw repairFailure;
+                }
+            }
             double videoSeconds = videoDuration(progress);
             double businessSeconds = seconds(start, end);
             double requestedSeconds = seconds(session.getStartTime(), session.getEndTime());
@@ -96,6 +113,26 @@ public class RecordingRemuxer {
                 "-movflags", "+faststart", output.toString());
     }
 
+    private String decode(Path output, long deadline) throws IOException {
+        return runner.run(List.of(properties.getFfmpegPath(), "-hide_banner", "-loglevel", "error",
+                "-nostdin", "-nostats", "-xerror", "-err_detect", "explode", "-threads", "1",
+                "-i", output.toString(), "-map", "0:v:0", "-an", "-threads", "1",
+                "-fps_mode", "passthrough", "-enc_time_base", "demux",
+                "-progress", "pipe:1", "-f", "null", "-"), deadline, output.getParent());
+    }
+
+    static boolean isCodecFailure(IOException failure) {
+        if (Thread.currentThread().isInterrupted() || failure instanceof java.io.InterruptedIOException
+                || failure.getCause() != null || failure.getMessage() == null) return false;
+        String message = failure.getMessage().toLowerCase(java.util.Locale.ROOT);
+        if (List.of("input/output error", "no space left", "permission denied", "cannot allocate memory",
+                "error opening", "out of memory", "broken pipe").stream().anyMatch(message::contains)) return false;
+        // runUntil's full bounded capture is required: progress lines can precede the codec error.
+        return message.matches("(?s)^命令失败 exit=-?[1-9][0-9]* .*" ) && message.contains("h264 @")
+                && (message.contains("error while decoding") || message.contains("error decoding")
+                || message.contains("decode_slice_header error") || message.contains("bytestream"));
+    }
+
     private static double videoDuration(String progress) throws IOException {
         long micros = -1;
         boolean ended = false;
@@ -107,7 +144,7 @@ public class RecordingRemuxer {
                 ended = "progress=end".equals(line.trim());
             }
         }
-        if (!ended || micros <= 0) throw new RecordingValidationException("封装成片没有完整的视频包时长");
+        if (!ended || micros <= 0) throw new RecordingValidationException("封装成片没有完整的视频解码时长");
         return micros / 1_000_000d;
     }
 

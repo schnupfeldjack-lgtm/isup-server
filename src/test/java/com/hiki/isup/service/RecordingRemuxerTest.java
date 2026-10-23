@@ -31,8 +31,31 @@ class RecordingRemuxerTest {
 
     @TempDir Path directory;
 
+    @Test void onlyActualStrictH264CodecExitQualifiesForTailProof() {
+        assertTrue(RecordingRemuxer.isCodecFailure(new IOException("命令失败 exit=183 "
+                + "out_time_us=123\n".repeat(100) + "[h264 @ 123] error while decoding MB 1 2 bytestream -5")));
+        for (IOException failure : List.of(new IOException("Cannot run program ffmpeg"),
+                new IOException("命令失败 exit=183 Permission denied"), new IOException("命令失败 exit=183 Invalid argument"),
+                new IOException("命令失败 exit=0 [h264 @ 123] bytestream -5"),
+                new IOException("命令失败 exit=183 [h264 @ 123] bytestream -5\nInput/output error"),
+                new IOException("[h264 @ 123] bytestream -5"), new SocketTimeoutException("命令失败 exit=183 [h264 @ 123] bytestream -5"),
+                new IOException("命令失败 exit=183 [h264 @ 123] bytestream -5", new InterruptedException()))) {
+            assertFalse(RecordingRemuxer.isCodecFailure(failure), failure.toString());
+        }
+    }
+
+    @Test void failedInitialCopyDoesNotAttemptTailProofEvenWithCodecText() throws Exception {
+        MediaSession session = session();
+        IOException failure = new IOException("命令失败 exit=183 [h264 @ 123] bytestream -5");
+        AtomicInteger count = new AtomicInteger();
+        RecordingRemuxer remuxer = new RecordingRemuxer(properties(), (command, deadline, parent) -> { count.incrementAndGet(); throw failure; });
+        assertSame(failure, assertThrows(IOException.class, () -> remuxer.remux(session, START, END, Long.MAX_VALUE)));
+        assertEquals(1, count.get());
+        assertEquals(0, failure.getSuppressed().length);
+    }
+
     @Test
-    void preservesOriginalSourceAndUsesOnlyVideoCopyForRemuxAndPacketValidation() throws Exception {
+    void preservesOriginalSourceAndCopiesForDeliveryButFullyDecodesForValidation() throws Exception {
         MediaSession session = session();
         byte[] original = Files.readAllBytes(Path.of(session.getRawFilePath()));
         List<List<String>> commands = new ArrayList<>();
@@ -53,7 +76,7 @@ class RecordingRemuxerTest {
 
         assertEquals(directory.resolve("recording-playable.mp4").toAbsolutePath(), output);
         assertArrayEquals(original, Files.readAllBytes(Path.of(session.getRawFilePath())));
-        assertEquals(2, commands.size(), "静音封装只需一次remux和一次视频包扫描");
+        assertEquals(2, commands.size(), "静音封装后须完整解码验收");
         List<String> remux = commands.getFirst();
         assertEquals("35000000", argument(remux, "-analyzeduration"));
         assertEquals("10000000", argument(remux, "-probesize"));
@@ -74,14 +97,26 @@ class RecordingRemuxerTest {
         assertFalse(remux.contains("0:a:0?"));
         assertFalse(remux.contains("-ss"), "纯视频输出自行归零，不得再按前置音频时长裁掉视频");
         List<String> probe = commands.getLast();
-        assertEquals("copy", argument(probe, "-c:v"));
+        assertFalse(probe.contains("-c:v"), "验收不能跳过视频解码");
+        assertTrue(probe.contains("-xerror"));
+        assertEquals("explode", argument(probe, "-err_detect"));
+        assertEquals("error", argument(probe, "-loglevel"));
+        assertTrue(probe.indexOf("-err_detect") < probe.indexOf("-i"));
+        assertEquals(2, probe.stream().filter("-threads"::equals).count());
+        assertTrue(probe.indexOf("-threads") < probe.indexOf("-i"));
+        assertTrue(probe.lastIndexOf("-threads") > probe.indexOf("-i"));
+        assertEquals("1", probe.get(probe.indexOf("-threads") + 1));
+        assertEquals("1", probe.get(probe.lastIndexOf("-threads") + 1));
+        assertEquals("passthrough", argument(probe, "-fps_mode"));
+        assertEquals("demux", argument(probe, "-enc_time_base"));
+        assertTrue(probe.contains("-an"));
         assertEquals("0:v:0", argument(probe, "-map"));
         assertEquals("pipe:1", argument(probe, "-progress"));
         assertEquals("null", argument(probe, "-f"));
         assertFalse(probe.contains("0:a:0?"));
         for (List<String> command : commands) {
             for (String forbidden : List.of("libx264", "-vf", "-af", "-r", "-t", "-ss", "-frames:v", "framehash",
-                    "-shortest", "-xerror", "-err_detect", "-bsf:v", "-discardcorrupt")) {
+                    "-shortest", "-bsf:v", "-discardcorrupt")) {
                 assertFalse(command.contains(forbidden), forbidden);
             }
         }

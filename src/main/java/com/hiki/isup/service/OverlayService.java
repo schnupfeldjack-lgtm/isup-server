@@ -9,6 +9,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.io.StringReader;
 import javax.xml.XMLConstants;
@@ -25,6 +27,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.time.LocalDateTime;
@@ -118,7 +121,14 @@ public class OverlayService implements DisposableBean {
     private final ScheduledExecutorService executor;
 
     /** 同一（deviceId, channel, overlayId）只保留一个待执行任务，新的会取消旧的 */
-    private final Map<String, ScheduledFuture<?>> pending = new ConcurrentHashMap<>();
+    private final Map<String, PendingHide> pending = new ConcurrentHashMap<>();
+    private final Object recoveryGate = new Object();
+    private int activeWrites;
+    private boolean recoveryQuiesced;
+
+    private static final class PendingHide {
+        private ScheduledFuture<?> future;
+    }
 
     /** 每个（deviceId, channel）最后一次真实写入设备的时间戳，用于写入节流 */
     private final Map<String, Long> lastWriteAt = new ConcurrentHashMap<>();
@@ -163,9 +173,54 @@ public class OverlayService implements DisposableBean {
      * @param channel  通道号，从 1 开始
      */
     public OverlayTextResponse apply(String deviceId, int channel, OverlayTextRequest request) {
-        String key = (deviceId == null ? "" : deviceId.trim()) + "|" + channel;
-        synchronized (channelLocks.computeIfAbsent(key, ignored -> new Object())) {
-            return applyLocked(deviceId, channel, request);
+        beginOverlayWrite();
+        try {
+            String key = (deviceId == null ? "" : deviceId.trim()) + "|" + channel;
+            synchronized (channelLocks.computeIfAbsent(key, ignored -> new Object())) {
+                return applyLocked(deviceId, channel, request);
+            }
+        } finally {
+            endOverlayWrite();
+        }
+    }
+
+    /**
+     * 仅空闲且没有待恢复字幕时原子关闭写入口。忙时立即返回 false，不等待设备调用。
+     * action 在独占期间执行；true 保持关闭供进程退出，false 或异常重新开放。
+     * action 不得调用字幕写操作；独占期间的新写请求明确返回 503。
+     */
+    public boolean tryQuiesceForRecovery(BooleanSupplier action) {
+        java.util.Objects.requireNonNull(action, "action");
+        synchronized (recoveryGate) {
+            if (recoveryQuiesced || activeWrites != 0 || !pending.isEmpty()) return false;
+            recoveryQuiesced = true;
+        }
+        boolean keepQuiesced = false;
+        try {
+            keepQuiesced = action.getAsBoolean();
+            return keepQuiesced;
+        } finally {
+            if (!keepQuiesced) {
+                synchronized (recoveryGate) {
+                    recoveryQuiesced = false;
+                }
+            }
+        }
+    }
+
+    private void beginOverlayWrite() {
+        synchronized (recoveryGate) {
+            if (recoveryQuiesced) {
+                throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                        "录像服务正在受控恢复，字幕写入暂不可用，请稍后重试");
+            }
+            activeWrites++;
+        }
+    }
+
+    private void endOverlayWrite() {
+        synchronized (recoveryGate) {
+            activeWrites--;
         }
     }
 
@@ -569,6 +624,26 @@ public class OverlayService implements DisposableBean {
         return true;
     }
 
+    /** 实际设备回读必须为已知字幕结构，且所有打包业务块均已清除。 */
+    static boolean packingOverlayCleared(String xml) {
+        try {
+            Element root = parseXml(xml);
+            if (!"VideoOverlay".equals(root.getLocalName())
+                    && !"TextOverlayList".equals(root.getLocalName())) return false;
+            if ("VideoOverlay".equals(root.getLocalName())) {
+                var lists = root.getElementsByTagNameNS("*", "TextOverlayList");
+                if (lists.getLength() != 1 || lists.item(0).getParentNode() != root) return false;
+            }
+            Map<Integer, List<String>> blocks = packingBlocks(xml, false);
+            if (blocks.keySet().stream().anyMatch(id -> id < 1 || id > PackingOverlayLayout.LAST_OVERLAY_ID)) {
+                return false;
+            }
+            return isPackingClearTarget(blocks);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private static boolean packingSystemOverlaysMatch(String xml) throws Exception {
         Element root = parseXml(xml);
         for (String name : List.of("DateTimeOverlay", "channelNameOverlay")) {
@@ -872,9 +947,14 @@ public class OverlayService implements DisposableBean {
     }
 
     private void cancelPending(String deviceId, int channel, int overlayId) {
-        ScheduledFuture<?> old = pending.remove(pendingKey(deviceId, channel, overlayId));
-        if (old != null) {
-            old.cancel(false);
+        beginOverlayWrite();
+        try {
+            synchronized (recoveryGate) {
+                PendingHide old = pending.remove(pendingKey(deviceId, channel, overlayId));
+                if (old != null && old.future != null) old.future.cancel(false);
+            }
+        } finally {
+            endOverlayWrite();
         }
     }
 
@@ -882,27 +962,59 @@ public class OverlayService implements DisposableBean {
      * 调度：delaySec 秒后把 overlay 1 恢复成「快递单号：」（单号从同一行消失，前缀仍在）。
      */
     private void scheduleHideWaybill(String deviceId, int channel, int overlayId, int delaySec) {
-        cancelPending(deviceId, channel, overlayId);
-        String key = pendingKey(deviceId, channel, overlayId);
-        ScheduledFuture<?> future = executor.schedule(() -> {
-            try {
-                restorePrefix(deviceId, channel, overlayId);
-            } catch (Throwable t) {
-                log.warn("恢复默认叠加文字异常：deviceId={}, channel={}, overlayId={}",
-                        deviceId, channel, overlayId, t.toString());
-            } finally {
-                pending.remove(key);
+        beginOverlayWrite();
+        try {
+            String key = pendingKey(deviceId, channel, overlayId);
+            synchronized (recoveryGate) {
+                cancelPending(deviceId, channel, overlayId);
+                PendingHide task = new PendingHide();
+                pending.put(key, task);
+                try {
+                    task.future = executor.schedule(() -> runPendingHide(key, task, deviceId, channel, overlayId),
+                            delaySec, TimeUnit.SECONDS);
+                } catch (RuntimeException e) {
+                    pending.remove(key, task);
+                    throw e;
+                }
             }
-        }, delaySec, TimeUnit.SECONDS);
-        pending.put(key, future);
+        } finally {
+            endOverlayWrite();
+        }
         log.info("已调度 {} 秒后恢复前缀：deviceId={}, channel={}, overlayId={}",
                 delaySec, deviceId, channel, overlayId);
+    }
+
+    private void runPendingHide(String key, PendingHide task, String deviceId, int channel, int overlayId) {
+        synchronized (recoveryGate) {
+            if (pending.get(key) != task) return;
+            beginOverlayWrite();
+        }
+        try {
+            restorePrefix(deviceId, channel, overlayId);
+        } catch (Throwable t) {
+            log.warn("恢复默认叠加文字异常：deviceId={}, channel={}, overlayId={}",
+                    deviceId, channel, overlayId, t.toString());
+        } finally {
+            synchronized (recoveryGate) {
+                pending.remove(key, task);
+                endOverlayWrite();
+            }
+        }
     }
 
     /**
      * 到期后 overlay 1 只留「快递单号：」，并关掉旧的单号块。
      */
     private void restorePrefix(String deviceId, int channel, int overlayId) {
+        beginOverlayWrite();
+        try {
+            restorePrefixWhileActive(deviceId, channel, overlayId);
+        } finally {
+            endOverlayWrite();
+        }
+    }
+
+    private void restorePrefixWhileActive(String deviceId, int channel, int overlayId) {
         OverlayTextRequest restore = new OverlayTextRequest();
         restore.setOverlayId(overlayId);
         restore.setText(WAYBILL_PREFIX);

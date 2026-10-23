@@ -61,6 +61,7 @@ public class SessionManager {
     private static final Set<SessionManager> UNRELEASED_MANAGERS = ConcurrentHashMap.newKeySet();
     private final Object lifecycleMonitor = new Object();
     private boolean closing;
+    private boolean recoveryPrepared;
     /** 与会话发布共用生命周期锁；每设备只保留一个截止代次，拒绝已取到旧快照的迟到请求。 */
     private final Map<String, Long> expiredConnectionGenerations = new HashMap<>();
 
@@ -68,6 +69,13 @@ public class SessionManager {
     private final ConcurrentHashMap<String, MediaSession> sessions = new ConcurrentHashMap<>();
 
     /** 类型 + ISUP 会话 ID -> 本服务 sessionId */
+    // Session IDs can be reused. Keep ownership tombstones until process exit to reject delayed exceptions.
+    private final ConcurrentHashMap<String, String> playbackExceptionOwners = new ConcurrentHashMap<>();
+    private static final int MAX_EXCEPTION_OWNERS = 10_000;
+    private static final int MAX_RECOVERY_LOCK_SESSIONS = 1024;
+    private volatile boolean exceptionMatchingDisabled;
+    private final AtomicBoolean recoverySessionLimitWarned = new AtomicBoolean();
+    private final Set<String> ambiguousPlaybackExceptionIds = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<String, String> isupSessionIndex = new ConcurrentHashMap<>();
 
     private final ScheduledExecutorService watchdog =
@@ -130,6 +138,15 @@ public class SessionManager {
                     <= expiredConnectionGenerations.getOrDefault(deviceId, 0L)) {
                 throw new IllegalStateException("设备连接已过期，请等待设备重新注册后重试");
             }
+            if (type == SessionType.PLAYBACK) {
+                long deviceCount = sessions.values().stream()
+                        .filter(s -> s.getType() == SessionType.PLAYBACK && s.getDeviceId().equals(deviceId))
+                        .filter(s -> !s.isFinished() || pendingCleanup.containsKey(s.getSessionId())).count();
+                if (deviceCount >= Math.max(1, properties.getSession().getMaxPlaybackPerDevice()))
+                    throw new IllegalStateException("设备回放并发已达上限，请先停止其他回放");
+                if (properties.getSession().getMaxActiveSessions() <= 0 && activeSlots.get() >= 8)
+                    throw new IllegalStateException("回放全局会话资源已达上限 8");
+            }
             reserveSlot();
             String sessionId = UUID.randomUUID().toString();
             MediaSession session = new MediaSession(sessionId, type, deviceId, channel, connection);
@@ -166,6 +183,14 @@ public class SessionManager {
 
     public MediaSession get(String sessionId) {
         return sessions.get(sessionId);
+    }
+
+    /** GET 查询和媒体读取不会调用此方法；只有明确的观看心跳续租。 */
+    public MediaSession heartbeat(String sessionId) {
+        MediaSession session = require(sessionId);
+        if (!session.renewViewerLease(System.currentTimeMillis()))
+            throw new com.hiki.isup.exception.BadRequestException("观看租约已到期、会话已停止或未启用租约");
+        return session;
     }
 
     /**
@@ -236,6 +261,20 @@ public class SessionManager {
         if (isupSessionId < 0) {
             return;
         }
+        if (session.getType() != SessionType.PREVIEW) {
+            String key = session.getLUserId() + ":" + isupSessionId;
+            synchronized (playbackExceptionOwners) {
+                if (!exceptionMatchingDisabled) {
+                    if (!playbackExceptionOwners.containsKey(key) && playbackExceptionOwners.size() >= MAX_EXCEPTION_OWNERS) {
+                        exceptionMatchingDisabled = true;
+                        log.warn("CMS exception ownership history reached capacity; fast exception matching disabled, watchdog retained");
+                    } else {
+                        String previous = playbackExceptionOwners.putIfAbsent(key, session.getSessionId());
+                        if (previous != null && !previous.equals(session.getSessionId())) ambiguousPlaybackExceptionIds.add(key);
+                    }
+                }
+            }
+        }
         session.setIsupSessionId(isupSessionId);
         isupSessionIndex.put(indexKey(session.getType(), isupSessionId), session.getSessionId());
     }
@@ -285,6 +324,31 @@ public class SessionManager {
         return candidates.get(0);
     }
 
+    public void onPlaybackException(int userId, int nativeSessionId, DeviceRegistry devices) {
+        if (exceptionMatchingDisabled || userId < 0 || nativeSessionId < 0
+                || ambiguousPlaybackExceptionIds.contains(userId + ":" + nativeSessionId)) return;
+        List<MediaSession> matches = sessions.values().stream()
+                .filter(s -> s.getType() != SessionType.PREVIEW && s.getLUserId() == userId
+                        && s.getIsupSessionId() == nativeSessionId).toList();
+        if (matches.size() != 1) return;
+        MediaSession session = matches.getFirst();
+        DeviceInfo connection = session.getDeviceConnection();
+        if (connection == null || devices.get(session.getDeviceId()) != connection
+                || connection.getLUserId() != userId || !connection.isOnline()) return;
+        PendingCleanup cleanup;
+        synchronized (session) {
+            String key = userId + ":" + nativeSessionId;
+            if (session.isFinished() || session.isStopping() || exceptionMatchingDisabled
+                    || ambiguousPlaybackExceptionIds.contains(key)
+                    || !session.getSessionId().equals(playbackExceptionOwners.get(key))) return;
+            cleanup = beginCleanup(session, false, "CMS playback exception 0x103");
+            cleanup.exceptionConnectionRegistry = devices;
+            session.setError("CMS playback exception 0x103");
+            session.setStatus(SessionStatus.FAILED);
+        }
+        requestCleanup(cleanup, false);
+    }
+
     public List<MediaSession> list() {
         List<MediaSession> list = new ArrayList<>(sessions.values());
         list.sort(Comparator.comparing(MediaSession::getCreatedAt).reversed());
@@ -311,14 +375,21 @@ public class SessionManager {
         PendingCleanup cleanup;
         synchronized (session) {
             if (session.isFinished()) {
+                if (session.getType() == SessionType.PLAYBACK && targetStatus != SessionStatus.COMPLETED) {
+                    session.releasePlayback();
+                    session.setStatus(targetStatus);
+                }
                 return;
             }
+            if (session.getType() == SessionType.PLAYBACK && targetStatus != SessionStatus.COMPLETED)
+                session.releasePlayback();
             cleanup = beginCleanup(session, false, reason);
+            cleanup.playbackCompletion = session.getType() == SessionType.PLAYBACK && targetStatus == SessionStatus.COMPLETED;
             if (reason != null) {
                 session.setError(reason);
             }
             // 终态与资源释放分开：调用方不能等待卡住的 native Stop。
-            session.setStatus(targetStatus);
+            if (!cleanup.playbackCompletion) session.setStatus(targetStatus);
         }
         requestCleanup(cleanup, false);
     }
@@ -435,6 +506,13 @@ public class SessionManager {
     }
 
     private void requestNativeStop(PendingCleanup cleanup) {
+        synchronized (lifecycleMonitor) {
+            if (recoveryPrepared) return;
+            requestNativeStopLocked(cleanup);
+        }
+    }
+
+    private void requestNativeStopLocked(PendingCleanup cleanup) {
         if (cleanup.nativeStopped || !cleanup.nativeRunning.compareAndSet(false, true)) {
             return;
         }
@@ -449,6 +527,7 @@ public class SessionManager {
         try {
             nativeStopExecutor.execute(() -> {
                 try {
+                    cleanup.attempts.incrementAndGet();
                     cleanup.nativeStopped = stopIsup(cleanup);
                 } finally {
                     cleanup.nativeRunning.set(false);
@@ -468,6 +547,19 @@ public class SessionManager {
         boolean muxSucceeded = awaitFfmpegExit(session);
         boolean writeFailed = process != null && process.isWriteFailed();
         boolean localStopped = session.getFfmpegProcess() == null;
+        if (cleanup.playbackCompletion) {
+            synchronized (session) {
+                if (!session.isFinished()) {
+                    if (localStopped && (process == null || muxSucceeded) && !writeFailed) {
+                        session.setStatus(SessionStatus.COMPLETED);
+                    } else {
+                        session.setError("回放封装未正常结束");
+                        session.setStatus(SessionStatus.FAILED);
+                        session.releasePlayback();
+                    }
+                }
+            }
+        }
         if (cleanup.download) {
             String filePath = session.getRawFilePath();
             if (filePath == null || filePath.isBlank()) {
@@ -515,14 +607,19 @@ public class SessionManager {
         private final long startedNanos = System.nanoTime();
         private final MediaSession session;
         private final boolean download;
+        private volatile boolean playbackCompletion;
         private final String reason;
         private final AtomicBoolean nativeRunning = new AtomicBoolean();
         private final AtomicBoolean localRunning = new AtomicBoolean();
         private final AtomicBoolean released = new AtomicBoolean();
         private volatile boolean nativeStopped;
         private volatile boolean localStopped;
-        private boolean streamStopped;
-        private boolean cmsStopped;
+        private volatile boolean streamStopped;
+        private volatile boolean cmsStopped;
+        private final java.util.concurrent.atomic.AtomicInteger attempts = new java.util.concurrent.atomic.AtomicInteger();
+        private volatile DeviceRegistry exceptionConnectionRegistry;
+        private volatile Integer lastCmsErrorCode;
+        private volatile Integer lastStreamErrorCode;
 
         private PendingCleanup(MediaSession session, boolean download, String reason) {
             this.session = session;
@@ -573,16 +670,24 @@ public class SessionManager {
                     cleanup.streamStopped = session.getType() == SessionType.PREVIEW
                             ? stream.NET_ESTREAM_StopPreview(linkHandle)
                             : stream.NET_ESTREAM_StopPlayBack(linkHandle);
+                    cleanup.lastStreamErrorCode = cleanup.streamStopped ? 0 : stream.NET_ESTREAM_GetLastError();
                 }
             }
             if (!cleanup.cmsStopped) {
                 if (lUserId < 0 || isupSessionId < 0) {
                     cleanup.cmsStopped = true;
                 } else {
+                    // A reconnect may have happened after exception matching but before this queued Stop.
+                    DeviceRegistry registry = cleanup.exceptionConnectionRegistry;
+                    if (registry != null && registry.get(session.getDeviceId()) != session.getDeviceConnection()) {
+                        log.warn("Skip stale exception CMS Stop: sessionId={}", session.getSessionId());
+                        return false;
+                    }
                     HCISUPCMS cms = sdkLoader.cms();
                     cleanup.cmsStopped = session.getType() == SessionType.PREVIEW
                             ? cms.NET_ECMS_StopGetRealStream(lUserId, isupSessionId)
                             : cms.NET_ECMS_StopPlayBack(lUserId, isupSessionId);
+                    cleanup.lastCmsErrorCode = cleanup.cmsStopped ? 0 : cms.NET_ECMS_GetLastError();
                 }
             }
             if (!cleanup.streamStopped || !cleanup.cmsStopped) {
@@ -647,7 +752,10 @@ public class SessionManager {
         if (dir == null) {
             return;
         }
-        boolean keep = session.getType() == SessionType.DOWNLOAD && targetStatus == SessionStatus.COMPLETED;
+        boolean keep = targetStatus == SessionStatus.COMPLETED
+                && (session.getType() == SessionType.DOWNLOAD
+                || (session.getType() == SessionType.PLAYBACK && !session.isPlaybackReleased()
+                && (!session.hasViewerLease() || System.currentTimeMillis() < session.getViewerLeaseExpiresAt())));
         if (keep) {
             log.info("保留下载文件：sessionId={}, dir={}", session.getSessionId(), dir);
             return;
@@ -749,6 +857,14 @@ public class SessionManager {
             long now = System.currentTimeMillis();
             for (MediaSession session : sessions.values()) {
                 try {
+                    if (session.hasViewerLease() && now >= session.getViewerLeaseExpiresAt()) {
+                        synchronized (session) {
+                            if (now >= session.getViewerLeaseExpiresAt()) {
+                                session.releasePlayback();
+                                if (!session.isFinished()) stopAsync(session, SessionStatus.STOPPED, "观看租约到期");
+                            }
+                        }
+                    }
                     PendingCleanup cleanup = pendingCleanup.get(session.getSessionId());
                     if (cleanup != null) {
                         requestCleanup(cleanup, false);
@@ -759,6 +875,10 @@ public class SessionManager {
                         continue;
                     }
                     long ageSec = Duration.between(session.getCreatedAt(), java.time.LocalDateTime.now()).getSeconds();
+                    if (session.getType() == SessionType.PLAYBACK && ageSec > 3630) {
+                        stopAsync(session, SessionStatus.FAILED, "回放超过一小时处理期限");
+                        continue;
+                    }
                     if (session.getStatus() == SessionStatus.STARTING) {
                         int timeout = propertiesStartTimeoutSec();
                         if (ageSec > timeout) {
@@ -771,6 +891,10 @@ public class SessionManager {
                         FfmpegProcess ffmpeg = session.getFfmpegProcess();
                         if (ffmpeg != null && !ffmpeg.isAlive()) {
                             stopAsync(session, SessionStatus.FAILED, "ffmpeg 进程已退出，会话终止");
+                            continue;
+                        }
+                        if (session.getType() == SessionType.PLAYBACK && ffmpeg != null && ffmpeg.isWriteFailed()) {
+                            stopAsync(session, SessionStatus.FAILED, "回放缓存或封装失败");
                             continue;
                         }
                         if (session.getType() == SessionType.DOWNLOAD
@@ -802,18 +926,21 @@ public class SessionManager {
         if (pendingCleanup.containsKey(session.getSessionId())) {
             return;
         }
-        // 已显式交还的文件不再受保留期保护，删除失败在下一轮看护继续重试。
-        if (!session.isFileCleanupStarted()) {
-            if (session.getUpdatedAt() == null) {
+        // 与心跳原子争用文件清理权；已取得清理权的租约不可复活。
+        synchronized (session) {
+            if (!session.isFileCleanupStarted() && !session.isPlaybackReleased()) {
+                if (session.getType() == SessionType.PLAYBACK && session.getStatus() == SessionStatus.COMPLETED
+                        && session.hasViewerLease()) {
+                    if (now < session.getViewerLeaseExpiresAt()) return;
+                } else {
+                    if (session.getUpdatedAt() == null) return;
+                    long updatedMillis = session.getUpdatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli();
+                    if (now - updatedMillis <= retainMillisFor(session)) return;
+                }
+            }
+            if (!session.beginFileCleanup()) {
                 return;
             }
-            long updatedMillis = session.getUpdatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli();
-            if (now - updatedMillis <= retainMillisFor(session)) {
-                return;
-            }
-        }
-        if (!session.beginFileCleanup()) {
-            return;
         }
         destroyFfmpegNow(session);
         session.runReleaseHook();
@@ -901,6 +1028,67 @@ public class SessionManager {
     }
 
     /** 先暂停领取，避免设备资源尚未归还时把新单的重试次数耗尽。 */
+    public record CleanupSnapshot(String sessionId, String deviceId, int channel, SessionType type,
+                                  SessionStatus status, int lUserId, int isupSessionId, int linkHandle,
+                                  long ageMillis, int attempts, Integer lastCmsErrorCode,
+                                  Integer lastStreamErrorCode, boolean nativeStopped, boolean localStopped,
+                                  boolean nativeRunning, boolean localRunning, boolean streamStopped,
+                                  boolean cmsStopped) { }
+
+    public List<CleanupSnapshot> cleanupSnapshot() {
+        long now = System.nanoTime();
+        return pendingCleanup.values().stream().map(c -> new CleanupSnapshot(c.session.getSessionId(),
+                c.session.getDeviceId(), c.session.getChannel(), c.session.getType(), c.session.getStatus(),
+                c.session.getLUserId(), c.session.getIsupSessionId(), c.session.getLinkHandle(),
+                TimeUnit.NANOSECONDS.toMillis(Math.max(0, now - c.startedNanos)), c.attempts.get(),
+                c.lastCmsErrorCode, c.lastStreamErrorCode, c.nativeStopped, c.localStopped,
+                c.nativeRunning.get(), c.localRunning.get(), c.streamStopped, c.cmsStopped)).toList();
+    }
+
+    public boolean canRecoverProcess(long minAgeMillis) {
+        synchronized (lifecycleMonitor) {
+            return withSessionLocks(new ArrayList<>(sessions.values()), 0, minAgeMillis, false);
+        }
+    }
+
+    public boolean prepareProcessRecovery(long minAgeMillis) {
+        synchronized (lifecycleMonitor) {
+            return withSessionLocks(new ArrayList<>(sessions.values()), 0, minAgeMillis, true);
+        }
+    }
+
+    private boolean withSessionLocks(List<MediaSession> all, int index, long age, boolean prepare) {
+        // Bound recursion even when completed downloads are configured to remain indefinitely.
+        if (all.size() > MAX_RECOVERY_LOCK_SESSIONS) {
+            if (recoverySessionLimitWarned.compareAndSet(false, true))
+                log.warn("Process recovery deferred: retained session count {} exceeds safe locking limit {}; wait for retention expiry", all.size(), MAX_RECOVERY_LOCK_SESSIONS);
+            return false;
+        }
+        if (index < all.size()) {
+            synchronized (all.get(index)) { return withSessionLocks(all, index + 1, age, prepare); }
+        }
+        if (closing || pendingCleanup.isEmpty() || all.stream().anyMatch(s -> !s.recoveryQuiescent())) return false;
+        ThreadPoolExecutor executor = (ThreadPoolExecutor) nativeStopExecutor;
+        if (executor.getActiveCount() != 0 || !executor.getQueue().isEmpty()
+                || FfmpegProcess.getTotalBufferedBytes() != 0) return false;
+        long now = System.nanoTime();
+        boolean oldEnough = false;
+        for (PendingCleanup c : pendingCleanup.values()) {
+            if (!c.localStopped || c.localRunning.get() || c.nativeRunning.get()
+                    || !c.streamStopped || c.nativeStopped || c.cmsStopped) return false;
+            if (TimeUnit.NANOSECONDS.toMillis(Math.max(0, now - c.startedNanos)) >= Math.max(0, age)) oldEnough = true;
+        }
+        if (!oldEnough) return false;
+        if (prepare) {
+            closing = true;
+            recoveryPrepared = true;
+            all.forEach(MediaSession::freezeForProcessRecovery);
+            watchdog.shutdownNow();
+            UNRELEASED_MANAGERS.add(this);
+        }
+        return true;
+    }
+
     public boolean recordingAdmissionBlocked() {
         if (FfmpegProcess.globalBudgetSaturated()) return true;
         int maximum = properties.getSession().getMaxActiveSessions();

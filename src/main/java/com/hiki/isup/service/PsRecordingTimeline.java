@@ -39,11 +39,13 @@ public final class PsRecordingTimeline {
     private final Anchor incompleteTailAnchor;
     private final List<PsDuplicateAccessUnits.VideoPacket> duplicateVideoPackets;
     private final byte[] sourceHash;
+    private final PsTailAccessUnit.Proof tailProof;
 
     private PsRecordingTimeline(List<Anchor> anchors, int streamId, int audioStreamCount,
                                 long sourceBytes, long completePrefixBytes, boolean incompleteTail,
                                 LocalDateTime incompleteTailHk, Anchor incompleteTailAnchor,
-                                List<PsDuplicateAccessUnits.VideoPacket> duplicateVideoPackets, byte[] sourceHash) {
+                                List<PsDuplicateAccessUnits.VideoPacket> duplicateVideoPackets, byte[] sourceHash,
+                                PsTailAccessUnit.Proof tailProof) {
         this.anchors = List.copyOf(anchors);
         this.streamId = streamId;
         this.audioStreamCount = audioStreamCount;
@@ -54,6 +56,7 @@ public final class PsRecordingTimeline {
         this.incompleteTailAnchor = incompleteTailAnchor;
         this.duplicateVideoPackets = List.copyOf(duplicateVideoPackets);
         this.sourceHash = sourceHash.clone();
+        this.tailProof = tailProof;
     }
 
     public record Anchor(LocalDateTime wallTime, long pts90k, long fileOffset) {
@@ -72,6 +75,44 @@ public final class PsRecordingTimeline {
     public boolean hasIncompleteTail() { return incompleteTail; }
     List<PsDuplicateAccessUnits.VideoPacket> duplicateVideoPackets() { return duplicateVideoPackets; }
     boolean matchesSourceHash(byte[] hash) { return MessageDigest.isEqual(sourceHash, hash); }
+
+    /** A separate proof: never infer an AU boundary from completePrefixBytes. */
+    record TailRepairPlan(long cutoffBytes, long pts90k, long dts90k, int streamId,
+                          long truncatedPesOffset, int missingBytes, Window window) {}
+
+    TailRepairPlan tailRepairPlan(LocalDateTime start, LocalDateTime end) throws IOException {
+        if (!incompleteTail || tailProof == null || !duplicateVideoPackets.isEmpty()) {
+            throw new RecordingValidationException("末尾不具备唯一完整 AU 起点及真实 EOF 缺损证明");
+        }
+        List<Anchor> kept = anchors.stream().filter(a -> a.fileOffset() < tailProof.cutoffBytes()).toList();
+        if (kept.size() < 2) throw new RecordingValidationException("末 AU 补救缺少保留区间的 HK 锚点");
+        Anchor first = kept.getFirst(), previous = first;
+        for (Anchor anchor : kept.subList(1, kept.size())) {
+            if (!continuous(first, previous, anchor) || !anchor.wallTime().isAfter(previous.wallTime())) {
+                throw new RecordingValidationException("末 AU 补救要求唯一连续、无回拨的 HK/PTS 段");
+            }
+            previous = anchor;
+        }
+        Anchor last = kept.getLast();
+        double extrapolation = (tailProof.pts90k() - last.pts90k()) / 90_000d;
+        double fromFirst = seconds(first.wallTime(), end) - (tailProof.pts90k() - first.pts90k()) / 90_000d;
+        double fromLast = seconds(last.wallTime(), end) - extrapolation;
+        if (extrapolation <= 0 || extrapolation > MAX_ANCHOR_GAP_SECONDS
+                || Math.abs(fromFirst - fromLast) > MAX_MAPPING_ERROR_SECONDS + 1e-9
+                || Math.max(fromFirst, fromLast) >= -MAX_MAPPING_ERROR_SECONDS - 1e-9) {
+            throw new RecordingValidationException("末 AU 时间扣除误差后不能证明严格晚于业务结束或外推过远");
+        }
+        if (tailProof.hk() != null && (!continuous(first, last,
+                new Anchor(tailProof.hk(), tailProof.pts90k(), tailProof.cutoffBytes()))
+                || seconds(end, tailProof.hk()) <= MAX_MAPPING_ERROR_SECONDS)) {
+            throw new RecordingValidationException("末 AU HK 与保留录像时钟不一致或触及业务区间");
+        }
+        PsRecordingTimeline retained = new PsRecordingTimeline(kept, streamId, audioStreamCount,
+                sourceBytes, tailProof.cutoffBytes(), false, null, null, List.of(), sourceHash, null);
+        Window window = retained.plan(start, end);
+        return new TailRepairPlan(tailProof.cutoffBytes(), tailProof.pts90k(), tailProof.dts90k(),
+                tailProof.streamId(), tailProof.truncatedPesOffset(), tailProof.missingBytes(), window);
+    }
 
     public static PsRecordingTimeline parse(Path source) throws IOException {
         return parse(source, Long.MAX_VALUE);
@@ -168,6 +209,7 @@ public final class PsRecordingTimeline {
         private final InputStream input;
         private final MessageDigest sourceHash = PsDuplicateAccessUnits.sha256();
         private final PsDuplicateAccessUnits duplicates = new PsDuplicateAccessUnits();
+        private final PsTailAccessUnit tail = new PsTailAccessUnit();
         private final List<Anchor> anchors = new ArrayList<>();
         private final Set<Long> anchorPts = new HashSet<>();
         private final Set<Integer> audioIds = new HashSet<>();
@@ -222,6 +264,7 @@ public final class PsRecordingTimeline {
                         break;
                     }
                     if (id == 0xba) {
+                        tail.barrier();
                         readPack();
                     } else {
                         if (id < 0xbb) throw invalid("PS 流类型不支持", packetOffset);
@@ -234,9 +277,13 @@ public final class PsRecordingTimeline {
                             payload = requiredBytes(length);
                         } catch (TruncatedPacketException e) {
                             // 残包已包含的 PES 时间头仍须合法，不能用 EOF 掩盖已知 DTS 回退。
-                            if (id >= 0xe0 && id <= 0xef) incompletePts = readVideo(id, e.partialBytes, packetOffset, false);
+                            if (id >= 0xe0 && id <= 0xef) {
+                                incompletePts = readVideo(id, e.partialBytes, packetOffset, false);
+                                tail.eof(length - e.partialBytes.length);
+                            }
                             throw e;
                         }
+                        if (id < 0xe0 || id > 0xef) tail.barrier();
                         if (id == 0xbc) readPsm(payload, packetOffset);
                         else if (id >= 0xe0 && id <= 0xef) readVideo(id, payload, packetOffset);
                         else if (id >= 0xc0 && id <= 0xdf
@@ -268,7 +315,7 @@ public final class PsRecordingTimeline {
             if (videoId < 0 || anchors.isEmpty()) throw new RecordingValidationException("原始 PS 缺少可信的 HK 视频时间锚点");
             return new PsRecordingTimeline(anchors, videoId, audioIds.size(), offset, completePrefixBytes,
                     incompleteTail, incompleteTailHk, incompleteTailAnchor,
-                    duplicates.skippedPackets(), sourceHash.digest());
+                    duplicates.skippedPackets(), sourceHash.digest(), tail.proof());
         }
 
         private void findFirstPack() throws IOException {
@@ -369,6 +416,7 @@ public final class PsRecordingTimeline {
             }
             if (flags == 0) {
                 if (pendingTime != null) throw invalid("HK 对应首个视频 PES 缺少 PTS", packetOffset);
+                tail.video(videoType, id, -1, -1, null, packetOffset, packetOffset, data, headerLength + 3, complete);
                 if (complete) duplicates.continuation(id, data, headerLength + 3, packetOffset, offset);
                 else duplicates.uncertainVideo();
                 if (complete) currentAccessUnit = null;
@@ -397,6 +445,8 @@ public final class PsRecordingTimeline {
                         + ", hkOffset=" + (pendingTime == null ? -1 : pendingOffset), packetOffset);
             }
             if (!complete) {
+                tail.video(videoType, id, pts, dts, pendingTime, pendingTime == null ? packetOffset : pendingOffset,
+                        packetOffset, data, headerLength + 3, false);
                 duplicates.uncertainVideo();
                 if (pendingTime == null && currentAccessUnit != null
                         && currentAccessUnit.anchor().pts90k() == pts && currentAccessUnit.dts90k() == dts) {
@@ -409,6 +459,8 @@ public final class PsRecordingTimeline {
                 currentAccessUnit = null;
             }
             previousPts = pts;
+            tail.video(videoType, id, pts, dts, pendingTime, pendingTime == null ? packetOffset : pendingOffset,
+                    packetOffset, data, headerLength + 3, true);
             previousDts = dts;
             previousOffset = packetOffset;
             previousHk = pendingTime;

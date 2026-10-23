@@ -4,11 +4,31 @@
 
 技术栈：Java 21 + Spring Boot 3 + Maven 单体应用 + JNA 调用海康 HCISUP SDK + FFmpeg 转封装。
 
-**不使用** Redis / Nacos / 微服务。设备与会话状态在内存；**出库包裹录像**（`isup.waybill-video`）可选接 MySQL 扫表 + 阿里云 OSS。
+**不使用** Redis / Nacos / 微服务。设备与会话状态在内存；出库包裹录像改为点击后按需回放，自动 MySQL 扫表、补偿下载和 OSS 上传已固定停用。
+
+### 按需历史回放
+
+`POST /api/v1/playback` 仍接收 `deviceId/channel/startTime/endTime`，单次最多 3600 秒。
+ERP 增加 `viewerLease: true` 后，须每 15 秒调用一次 `POST /api/v1/sessions/{sessionId}/heartbeat`，
+90 秒没有有效心跳就停止并回收。创建、心跳、查询和停止均使用服务端 `X-API-Key`；浏览器使用返回的签名 `playUrl`，不可接触 API Key。
+GET 会话和读取媒体不续租。心跳返回会话状态与重新签名的 `playUrl`，租约过期后不能复活，需重新创建。
+
+历史回放使用 HLS EVENT 完整列表，来源结束后先排空 FFmpeg 并写 ENDLIST，尾部保留到观看租约到期或 DELETE 停止。
+不传 `viewerLease` 的旧调试调用兼容，来源结束后保留 10 分钟；普通 preview 继续滚动列表。
+`DELETE /api/v1/sessions/{sessionId}` 也能停止已经来源结束的会话；本地文件由异步清理/最长 15 秒一轮的看护回收。
+默认每设备最多 2 路进行中的回放（`isup.session.max-playback-per-device`），全局仍受 `max-active-sessions` 限制；全局配置不限时，回放仍有 8 路保护。
+新观看租约回放也遵守原录制资源门禁；native 清理超过 5 秒未确认、全局槽位或码流缓存耗尽时拒绝创建并返回 503。
+缓存复用磁盘保护：回放总缓存 10 GiB、单路 2 GiB、预留空闲 1 GiB，每秒检查，超限停止新写入。
+默认继续复用已有 HLS 编码配置，避免无条件转码。若设备输出 H.265 且浏览器不兼容，可仅配置
+`isup.ffmpeg.playback-codec-args: -c:v libx264 -preset ultrafast -tune zerolatency -g 50 -an`，不改变 preview 或打包录像。
+旧 OSS 文件和 URL 不变，新回放不生成 OSS 文件或永久 URL。
+
+`WaybillVideoSyncJob` 不再注册调度，`syncOnce` 固定不执行，`releaseRetry` 固定拒绝。
+外置配置 `isup.waybill-video.enabled=true` 也不能恢复自动下载/上传；以下同步配置和实现仅作历史参考。
 
 敏感配置（`api-key`、数据库密码、OSS 密钥）请用环境变量或 jar 旁 `config/application.yml`（勿提交仓库），见 `config/application.example.yml`。
 
-仓库内的 dev / dev-test / prod 配置不包含真实凭据。首次部署或替换旧版内置配置前，必须在外置配置中提供公网地址、设备接入密钥、ERP API 密钥，以及启用录像同步所需的数据库和 OSS 配置。复制示例后填写现有环境的值；不要把旧的完整配置覆盖回源码，也不要将私有备份、生产录像、日志或构建目录提交到仓库。
+仓库内的 dev / dev-test / prod 配置不包含真实凭据。首次部署或替换旧版内置配置前，必须在外置配置中提供公网地址、设备接入密钥、ERP API 密钥。复制示例后填写现有环境的值；不要把旧的完整配置覆盖回源码，也不要将私有备份、生产录像、日志或构建目录提交到仓库。
 
 ---
 

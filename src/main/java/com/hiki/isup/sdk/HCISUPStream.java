@@ -11,6 +11,15 @@ import com.sun.jna.Pointer;
  */
 public interface HCISUPStream extends Library {
 
+    int EHOME_PLAYBACK_EXCEPTION = 0x103;
+
+    interface EXCEPTION_CALLBACK extends Callback {
+        void invoke(int type, int userId, int handle, Pointer userData);
+    }
+
+    boolean NET_ESTREAM_SetExceptionCallBack(int message, Pointer window,
+                                             EXCEPTION_CALLBACK callback, Pointer userData);
+
     /** 码流头数据 */
     int NET_EHOME_SYSHEAD = 1;
     /** 码流数据（复合流 / 音视频分开的数据） */

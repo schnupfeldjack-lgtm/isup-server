@@ -20,6 +20,24 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FfmpegProcessTest {
 
+    @Test void downloadFinalizationRunsOnceAndIoFailurePreventsSuccessfulCompletion() {
+        for (boolean fail : new boolean[]{false, true}) {
+            FfmpegProcess capture = FfmpegProcess.capture(new ByteArrayOutputStream(), "finalizer");
+            java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+            capture.onCompletion(deadline -> {
+                calls.incrementAndGet();
+                if (fail) throw new IOException("test finalization failure");
+            });
+            try {
+                capture.closeStdin();
+                assertEquals(fail ? 1 : 0, capture.waitFor(3));
+                assertEquals(fail, capture.isWriteFailed());
+                assertEquals(fail ? 1 : 0, capture.waitFor(3));
+                assertEquals(1, calls.get());
+            } finally { capture.destroy(); }
+        }
+    }
+
     @Test void closeDuringNativeCopyDrainsTheAcceptedTailPacket() throws Exception {
         FfmpegProcess.MemoryBudget budget = new FfmpegProcess.MemoryBudget(8192, 16384, 32768);
         ByteArrayOutputStream raw = new ByteArrayOutputStream();

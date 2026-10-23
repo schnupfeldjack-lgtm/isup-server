@@ -12,6 +12,16 @@ isup:
   api-key: ${ISUP_API_KEY:}
   # HLS 签名地址有效期，限制范围 60~86400 秒
   media-url-ttl-seconds: ${ISUP_MEDIA_URL_TTL_SECONDS:7200}
+  # 自动同步固定停用，true 也不能恢复扫表/下载/OSS 上传。
+  waybill-video:
+    enabled: false
+  session:
+    max-active-sessions: 8
+    max-playback-per-device: 2
+  ffmpeg:
+    # 留空保持原 HLS 编码策略；H.265 浏览器不兼容时可仅回放转 H.264：
+    # playback-codec-args: -c:v libx264 -preset ultrafast -tune zerolatency -g 50 -an
+    playback-codec-args: ""
   stream:
     # 回放与录像下载共用；云安全组和系统防火墙需放行 TCP 8661
     playback-port: ${ISUP_PLAYBACK_PORT:8661}

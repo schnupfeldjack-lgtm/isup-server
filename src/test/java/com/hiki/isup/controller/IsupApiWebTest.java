@@ -42,6 +42,26 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class IsupApiWebTest {
 
     @Test
+    void viewingHeartbeatIsAuthenticatedAndGetDoesNotRenew() throws Exception {
+        var session = sessionManager.create(SessionType.PLAYBACK, "lease-api-test", 1);
+        session.enableViewerLease(); session.setStatus(SessionStatus.COMPLETED);
+        try {
+            String path = "/api/v1/sessions/" + session.getSessionId();
+            long before = session.getViewerLeaseExpiresAt();
+            mockMvc.perform(post(path + "/heartbeat")).andExpect(status().isUnauthorized());
+            mockMvc.perform(get(path).header(ApiKeyInterceptor.API_KEY_HEADER, API_KEY))
+                    .andExpect(status().isOk());
+            org.junit.jupiter.api.Assertions.assertEquals(before, session.getViewerLeaseExpiresAt());
+            mockMvc.perform(post(path + "/heartbeat").header(ApiKeyInterceptor.API_KEY_HEADER, API_KEY))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("COMPLETED"));
+            mockMvc.perform(delete(path).header(ApiKeyInterceptor.API_KEY_HEADER, API_KEY))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("STOPPED"));
+            mockMvc.perform(post(path + "/heartbeat").header(ApiKeyInterceptor.API_KEY_HEADER, API_KEY))
+                    .andExpect(status().isBadRequest());
+        } finally { sessionManager.stop(session, SessionStatus.STOPPED, "test cleanup"); }
+    }
+
+    @Test
     void recordingDiagnosticsAreAuthenticatedAndDoNotNeedDatabaseOrSdk() throws Exception {
         mockMvc.perform(get("/api/v1/recordings/diagnostics"))
                 .andExpect(status().isUnauthorized());

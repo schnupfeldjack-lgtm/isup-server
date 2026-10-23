@@ -238,6 +238,12 @@ public class IsupController {
         return toResponse(sessionManager.require(sessionId));
     }
 
+    @PostMapping("/api/v1/sessions/{sessionId}/heartbeat")
+    public SessionStatusResponse heartbeat(@PathVariable String sessionId) {
+        if (!MediaPaths.isSafeId(sessionId)) throw new BadRequestException("sessionId 格式非法");
+        return toResponse(sessionManager.heartbeat(sessionId));
+    }
+
     /**
      * 查询会话（按创建时间倒序，默认最多 200 条）。
      *
@@ -291,6 +297,9 @@ public class IsupController {
             throw new BadRequestException("sessionId 格式非法：" + sessionId);
         }
         MediaSession session = sessionManager.require(sessionId);
+        if (session.getType() == SessionType.PLAYBACK && session.isFinished()) {
+            sessionManager.stopAsync(session, SessionStatus.STOPPED, "客户端主动停止");
+        }
         if (!session.isFinished()) {
             // 停止动作内含海康 SDK 调用，个别设备无响应时可能长时间不返回。
             // 交给停止线程池执行，请求线程只等一个很短的时间拿终态。

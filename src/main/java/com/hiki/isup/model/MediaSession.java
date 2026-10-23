@@ -31,6 +31,24 @@ public class MediaSession {
     private final DeviceInfo deviceConnection;
 
     private volatile SessionStatus status = SessionStatus.STARTING;
+    private volatile long viewerLeaseExpiresAt;
+    private volatile boolean playbackReleased;
+    public static final long VIEWER_LEASE_MILLIS = 90_000;
+
+    public synchronized void enableViewerLease() {
+        if (type != SessionType.PLAYBACK) throw new IllegalArgumentException("仅回放支持观看租约");
+        viewerLeaseExpiresAt = System.currentTimeMillis() + VIEWER_LEASE_MILLIS;
+    }
+    public boolean hasViewerLease() { return viewerLeaseExpiresAt > 0; }
+    public long getViewerLeaseExpiresAt() { return viewerLeaseExpiresAt; }
+    public boolean isPlaybackReleased() { return playbackReleased; }
+    public synchronized void releasePlayback() { playbackReleased = true; }
+    public synchronized boolean renewViewerLease(long now) {
+        if (!hasViewerLease() || playbackReleased || fileCleanupStarted || recoveryFrozen || now >= viewerLeaseExpiresAt
+                || (isFinished() && status != SessionStatus.COMPLETED)) return false;
+        viewerLeaseExpiresAt = now + VIEWER_LEASE_MILLIS;
+        return true;
+    }
     private volatile LocalDateTime updatedAt = LocalDateTime.now();
 
     /** 设备登录句柄 */
@@ -49,11 +67,12 @@ public class MediaSession {
     /** 下载文件大小（字节），-1 表示尚未确定，确定后不再反复查磁盘 */
     private volatile long fileSize = -1;
     private int fileConsumers;
+    private boolean recoveryFrozen;
     private boolean fileCleanupStarted;
 
     /** 成片排队、转码和上传期间保护已完成下载的文件。 */
     public synchronized boolean retainFiles() {
-        if (fileCleanupStarted) {
+        if (fileCleanupStarted || recoveryFrozen) {
             return false;
         }
         fileConsumers++;
@@ -79,6 +98,16 @@ public class MediaSession {
     public synchronized boolean isFileCleanupStarted() {
         return fileCleanupStarted;
     }
+
+    public synchronized boolean recoveryQuiescent() {
+        // 来源已结束不代表观看已结束；有效租约仍保护 HLS，不能因 API 暂时静默而重启。
+        if (hasViewerLease() && !playbackReleased && System.currentTimeMillis() < viewerLeaseExpiresAt) {
+            return false;
+        }
+        return isFinished() && nativeOperations == 0 && fileConsumers == 0
+                && (ffmpegProcess == null || !ffmpegProcess.isAlive());
+    }
+    public synchronized void freezeForProcessRecovery() { recoveryFrozen = true; }
 
     private volatile LocalDateTime startTime;
     private volatile LocalDateTime endTime;
@@ -110,7 +139,7 @@ public class MediaSession {
     private int nativeOperations;
 
     public synchronized boolean tryBeginNativeOperation() {
-        if (isStopping() || isFinished()) {
+        if (recoveryFrozen || isStopping() || isFinished()) {
             return false;
         }
         nativeOperations++;
@@ -220,7 +249,8 @@ public class MediaSession {
 
     public synchronized void setStatus(SessionStatus status) {
         // 超时/取消一旦发布，迟到的首帧或收尾结果不能将任务重新置为运行/成功。
-        if (isFinished()) {
+        if (isFinished() && !(type == SessionType.PLAYBACK && this.status == SessionStatus.COMPLETED
+                && playbackReleased && (status == SessionStatus.STOPPED || status == SessionStatus.FAILED))) {
             return;
         }
         this.status = status;

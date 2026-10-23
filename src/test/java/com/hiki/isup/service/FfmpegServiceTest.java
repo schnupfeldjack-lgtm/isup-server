@@ -15,6 +15,37 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class FfmpegServiceTest {
 
+    @Test void downloadDoesNotFlushAnUnconfirmedTerminalHevcFrame(@org.junit.jupiter.api.io.TempDir Path temp) throws Exception {
+        String executable = System.getProperty("isup.test.ffmpeg", "");
+        String source = System.getProperty("isup.test.tailSource", "");
+        org.junit.jupiter.api.Assumptions.assumeTrue(!executable.isBlank() && !source.isBlank());
+        IsupProperties properties = properties();
+        properties.setFfmpegPath(executable);
+        properties.getFfmpeg().setMp4CodecArgs("-map 0:v:0 -c:v copy -an");
+        Path output = temp.resolve("tail.mp4");
+        FfmpegProcess writer = new FfmpegService().startMp4(properties, output, "hevc-tail");
+        try {
+            try (var input = java.nio.file.Files.newInputStream(Path.of(source))) {
+                byte[] buffer = new byte[8191]; int n;
+                while ((n = input.read(buffer)) >= 0) writer.write(buffer, 0, n);
+            }
+            writer.closeStdin();
+            assertEquals(0, writer.waitFor(20));
+            org.junit.jupiter.api.Assertions.assertFalse(writer.isWriteFailed());
+            String probe = Path.of(executable).resolveSibling("ffprobe.exe").toString();
+            Process count = new ProcessBuilder(probe, "-v", "error", "-select_streams", "v:0", "-count_packets",
+                    "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", output.toString())
+                    .redirectOutput(temp.resolve("count.txt").toFile()).redirectError(temp.resolve("probe.log").toFile()).start();
+            assertTrue(count.waitFor(10, java.util.concurrent.TimeUnit.SECONDS));
+            assertEquals(0, count.exitValue());
+            assertEquals(System.getProperty("isup.test.tailExpectedFrames", "1358"),
+                    java.nio.file.Files.readString(temp.resolve("count.txt")).strip());
+            String evidence = System.getProperty("isup.test.tailOutput", "");
+            if (!evidence.isBlank()) java.nio.file.Files.copy(output, Path.of(evidence), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            assertEquals(0, writer.waitFor(2), "重复等待不能再次裁掉尾帧");
+        } finally { writer.destroy(); }
+    }
+
     @Test void packingCaptureDoesNotRunFfmpegOrCreateIntermediateMp4(@org.junit.jupiter.api.io.TempDir Path temp) throws Exception {
         IsupProperties properties = properties();
         properties.setFfmpegPath(temp.resolve("ffmpeg-does-not-exist").toString());

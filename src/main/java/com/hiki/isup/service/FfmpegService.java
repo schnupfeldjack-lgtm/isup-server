@@ -33,6 +33,32 @@ public class FfmpegService {
         return start(properties, command, dir, sessionId, true);
     }
 
+    public FfmpegProcess startPlaybackHls(IsupProperties properties, Path dir, String sessionId) throws IOException {
+        Files.createDirectories(dir);
+        RecordingStorageGuard.checkRoot(dir.getParent());
+        FfmpegProcess process = start(properties, buildPlaybackHlsCommand(properties, dir), dir, sessionId, false);
+        // 包含已完成且仍被观看的 event 列表；总缓存 10GiB，单路 2GiB，保留磁盘 1GiB。
+        process.monitorOutput(() -> {
+            RecordingStorageGuard.checkRoot(dir.getParent());
+            RecordingStorageGuard.checkRoot(dir, RecordingStorageGuard.MAX_OUTPUT_BYTES,
+                    RecordingStorageGuard.MIN_FREE_BYTES, path -> Files.getFileStore(path).getUsableSpace());
+        });
+        return process;
+    }
+
+    public static List<String> buildPlaybackHlsCommand(IsupProperties properties, Path dir) {
+        String override = properties.getFfmpeg().getPlaybackCodecArgs();
+        List<String> command = buildHlsCommand(properties, dir,
+                override == null || override.isBlank() ? properties.getFfmpeg().getHlsCodecArgs() : override);
+        command.set(command.indexOf("-hls_list_size") + 1, "0");
+        command.set(command.indexOf("-hls_flags") + 1, "temp_file");
+        command.add(command.size() - 1, "-hls_playlist_type");
+        command.add(command.size() - 1, "event");
+        command.add(command.size() - 1, "-t");
+        command.add(command.size() - 1, "3600");
+        return command;
+    }
+
     /**
      * 启动 MP4 输出进程，输出到 file。
      */
@@ -45,6 +71,10 @@ public class FfmpegService {
         List<String> command = buildMp4Command(properties, file);
         // 下载：文件必须完整，队列满时等待而不是丢包
         FfmpegProcess process = start(properties, command, parent, sessionId, false);
+        process.onCompletion(deadline -> {
+            int samples = Mp4DownloadTail.finish(file, deadline);
+            log.info("下载封装收尾：sessionId={}, terminalVideoSamples={}", sessionId, samples);
+        });
         process.monitorOutput(() -> RecordingStorageGuard.checkOutput(file, RecordingStorageGuard.MAX_OUTPUT_BYTES));
         return process;
     }
@@ -65,6 +95,10 @@ public class FfmpegService {
      * 构建 HLS 命令（HLS 用于浏览器直接播放）。
      */
     public static List<String> buildHlsCommand(IsupProperties properties, Path dir) {
+        return buildHlsCommand(properties, dir, properties.getFfmpeg().getHlsCodecArgs());
+    }
+
+    private static List<String> buildHlsCommand(IsupProperties properties, Path dir, String codecArgs) {
         IsupProperties.Ffmpeg cfg = properties.getFfmpeg();
         List<String> command = new ArrayList<>();
         command.add(properties.getFfmpegPath());
@@ -72,7 +106,7 @@ public class FfmpegService {
         command.add("-loglevel");
         command.add(cfg.getLogLevel());
         appendInputArgs(command, cfg);
-        command.addAll(resolveCodecArgs(cfg, cfg.getHlsCodecArgs()));
+        command.addAll(resolveCodecArgs(cfg, codecArgs));
         if (cfg.getThreads() > 0) {
             command.add("-threads");
             command.add(String.valueOf(cfg.getThreads()));

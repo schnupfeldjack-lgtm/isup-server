@@ -7,8 +7,12 @@ import com.hiki.isup.sdk.HCISUPStream;
 import com.hiki.isup.service.FfmpegProcess;
 import com.hiki.isup.service.SessionManager;
 import com.sun.jna.Pointer;
+import com.sun.jna.Native;
+import com.sun.jna.CallbackThreadInitializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * 回放 / 下载码流数据回调。
@@ -23,6 +27,8 @@ public class PlaybackDataCallback implements HCISUPStream.PLAYBACK_DATA_CB {
 
     private static final Logger log = LoggerFactory.getLogger(PlaybackDataCallback.class);
 
+    // 单路公平排队：DATA 不得乱序，END 不得越过已进入的尾包。
+    private final ReentrantLock callbackOrder = new ReentrantLock(true);
     private final MediaSession session;
     private final SessionManager sessionManager;
     private volatile long totalBytes;
@@ -31,12 +37,17 @@ public class PlaybackDataCallback implements HCISUPStream.PLAYBACK_DATA_CB {
     public PlaybackDataCallback(MediaSession session, SessionManager sessionManager) {
         this.session = session;
         this.sessionManager = sessionManager;
+        // Native SDK workers deliver many small packets. Retain their JVM attachment until
+        // native thread exit instead of attaching/detaching and allocating a Thread per packet.
+        Native.setCallbackThreadInitializer(this,
+                new CallbackThreadInitializer(true, false, "isup-playback-data"));
     }
 
     @Override
     public boolean invoke(int iPlayBackLinkHandle,
                           HCISUPStream.NET_EHOME_PLAYBACK_DATA_CB_INFO pDataCBInfo,
                           Pointer pUserData) {
+        callbackOrder.lock();
         try {
             int type = pDataCBInfo.dwType;
 
@@ -69,6 +80,8 @@ public class PlaybackDataCallback implements HCISUPStream.PLAYBACK_DATA_CB {
         } catch (Exception e) {
             log.error("处理回放码流异常：operation=PlaybackCallback, deviceId={}, channel={}, sessionId={}, handle={}",
                     session.getDeviceId(), session.getChannel(), session.getSessionId(), iPlayBackLinkHandle, e);
+        } finally {
+            callbackOrder.unlock();
         }
         return true;
     }
@@ -92,5 +105,9 @@ public class PlaybackDataCallback implements HCISUPStream.PLAYBACK_DATA_CB {
 
     public long getTotalBytes() {
         return totalBytes;
+    }
+
+    public String getSessionId() {
+        return session.getSessionId();
     }
 }

@@ -17,6 +17,14 @@ import java.util.List;
  */
 public interface HCISUPCMS extends Library {
 
+    /** SDK guide 16.9: DWORD, int user ID, int session ID, void*. */
+    int EHOME_PLAYBACK_EXCEPTION = 0x103;
+    interface EXCEPTION_CALLBACK extends Callback {
+        void invoke(int type, int userId, int sessionId, Pointer user);
+    }
+    /** DWORD is 32 bits; HWND/HANDLE and user context are pointer-sized. */
+    boolean NET_ECMS_SetExceptionCallBack(int message, Pointer window, EXCEPTION_CALLBACK callback, Pointer user);
+
     // ==================== 常量 ====================
     int MAX_MASTER_KEY_LEN = 16;
     int MAX_DEVICE_ID_LEN = 256;

@@ -156,7 +156,10 @@ class DeviceConnectionCleanupTest {
     @EnumSource(SessionType.class)
     void eventualOfflineAlsoCleansSessionsPreservedThroughEarlierGraceReconnect(SessionType type) {
         DeviceRegistry registry = new DeviceRegistry(30);
-        SessionManager manager = new SessionManager(mock(NativeSdkLoader.class), new IsupProperties());
+        IsupProperties properties = new IsupProperties();
+        // 本用例有意同时保留三代，独立验证连接清理；默认两路限额另有按需回放测试。
+        properties.getSession().setMaxPlaybackPerDevice(3);
+        SessionManager manager = new SessionManager(mock(NativeSdkLoader.class), properties);
         try {
             DeviceInfo first = registry.online(7, "device", "127.0.0.1", "serial", "camera");
             MediaSession preserved = manager.create(type, first, 1);

@@ -101,6 +101,7 @@ public class FfmpegProcess {
     private volatile OutputGuard outputGuard;
     private volatile ScheduledFuture<?> outputMonitor;
     private volatile GuardCheck guardCheck;
+    private CompletionAction completionAction;
     private final boolean dropWhenFull;
     private final AtomicLong droppedPackets = new AtomicLong();
     private final Thread writerThread;
@@ -491,6 +492,7 @@ public class FfmpegProcess {
                     return null;
                 }
                 verifyOutputBeforeCompletion(deadline);
+                finishOutput(deadline);
                 cancelOutputMonitor();
                 return exitValue();
             }
@@ -500,6 +502,23 @@ public class FfmpegProcess {
             return null;
         }
     }
+
+    /** 仅正常下载封装配置；进程与 writer 均已退出后，在交付文件前执行一次索引收尾。 */
+    synchronized void onCompletion(CompletionAction action) { completionAction = action; }
+
+    private synchronized void finishOutput(long deadline) {
+        CompletionAction action = completionAction;
+        completionAction = null;
+        if (action == null || writeFailed.get() || !Integer.valueOf(0).equals(exitValue())) return;
+        try { action.finish(deadline); }
+        catch (IOException | RuntimeException e) {
+            markWriteFailed("下载封装收尾失败");
+            log.warn("下载封装收尾失败：sessionId={}", sessionId, e);
+        }
+    }
+
+    @FunctionalInterface
+    interface CompletionAction { void finish(long deadlineNanos) throws IOException; }
 
     /**
      * 强制销毁进程并释放流。

@@ -30,6 +30,37 @@ class FfmpegPipelineTest {
 
     @Test
     @EnabledIfSystemProperty(named = "isup.ffmpeg.it", matches = "true")
+    void historicalPlaybackDrainsWritesEndlistAndKeepsAllSegments() throws Exception {
+        var properties = new IsupProperties(); properties.setFfmpegPath(FFMPEG);
+        properties.getFfmpeg().setHlsListSize(2);
+        Path ps = generateTestPs("event", 20);
+        Path dir = Path.of("target", "test-playback-" + UUID.randomUUID());
+        var manager = new SessionManager(new com.hiki.isup.sdk.NativeSdkLoader(), properties);
+        var session = manager.create(com.hiki.isup.model.SessionType.PLAYBACK, "local-test", 1);
+        session.enableViewerLease(); session.setOutputDir(dir.toString());
+        var process = new FfmpegService().startPlaybackHls(properties, dir, session.getSessionId());
+        session.setFfmpegProcess(process);
+        try {
+            pipe(ps, process);
+            // 与设备结束信令完全相同的停止路径，必须排空输入再保留尾部。
+            manager.stopAsync(session, com.hiki.isup.model.SessionStatus.COMPLETED, null);
+            assertEquals(0, process.waitFor(30));
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+            while (session.getFfmpegProcess() != null && System.nanoTime() < deadline) Thread.sleep(20);
+            assertEquals(com.hiki.isup.model.SessionStatus.COMPLETED, session.getStatus());
+            String playlist = Files.readString(dir.resolve("index.m3u8"));
+            assertTrue(playlist.contains("#EXT-X-PLAYLIST-TYPE:EVENT"));
+            assertTrue(playlist.contains("#EXT-X-ENDLIST"));
+            var segments = playlist.lines().filter(line -> line.endsWith(".ts")).toList();
+            assertTrue(segments.size() >= 9, "历史列表须保留全部 20 秒，不能滚动掉开头");
+            for (String segment : segments) assertTrue(Files.size(dir.resolve(segment)) > 0);
+            assertEquals(0, manager.resourceSnapshot().reservedSlots());
+            assertEquals(session, manager.heartbeat(session.getSessionId()));
+        } finally { manager.shutdown(); }
+    }
+
+    @Test
+    @EnabledIfSystemProperty(named = "isup.ffmpeg.it", matches = "true")
     @DisplayName("PS 码流转封装为 HLS：生成 index.m3u8 与 ts 切片")
     void psToHls() throws Exception {
         IsupProperties properties = new IsupProperties();
@@ -95,12 +126,16 @@ class FfmpegPipelineTest {
      * 用 ffmpeg 生成一段 MPEG-PS 测试码流（模拟设备推来的 PS 流）。
      */
     private Path generateTestPs(String tag) throws Exception {
+        return generateTestPs(tag, 4);
+    }
+
+    private Path generateTestPs(String tag, int seconds) throws Exception {
         Path ps = Path.of("target", "test-" + tag + "-" + UUID.randomUUID() + ".ps");
         Files.createDirectories(ps.getParent());
         ProcessBuilder builder = new ProcessBuilder(
                 FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
-                "-f", "lavfi", "-i", "testsrc=duration=4:size=320x240:rate=25",
-                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-f", "lavfi", "-i", "testsrc=duration=" + seconds + ":size=320x240:rate=25",
+                "-c:v", "libx264", "-bf", "0", "-g", "50", "-pix_fmt", "yuv420p",
                 "-f", "mpeg", ps.toString());
         Process p = builder.start();
         assertTrue(p.waitFor(60, java.util.concurrent.TimeUnit.SECONDS), "生成测试 PS 超时");

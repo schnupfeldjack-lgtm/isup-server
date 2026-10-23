@@ -351,6 +351,10 @@ public class IsupProperties {
          * 所以 HLS 常常要 libx264 转码，MP4 却仍可 copy。</p>
          */
         private String hlsCodecArgs = "";
+        /** 历史回放独立编码参数，留空复用 HLS/codecArgs；不影响 preview 和 MP4。 */
+        private String playbackCodecArgs = "";
+        public String getPlaybackCodecArgs() { return playbackCodecArgs; }
+        public void setPlaybackCodecArgs(String value) { playbackCodecArgs = value; }
         /** MP4（录像下载）专用编码参数，留空则回退 codecArgs。 */
         private String mp4CodecArgs = "";
         private int hlsTime = 2;
@@ -509,6 +513,10 @@ public class IsupProperties {
          * 每路 HLS 转码约 1 核；0 表示不限制。
          */
         private int maxActiveSessions = 8;
+        private int maxPlaybackPerDevice = 2;
+
+        public int getMaxPlaybackPerDevice() { return maxPlaybackPerDevice; }
+        public void setMaxPlaybackPerDevice(int value) { maxPlaybackPerDevice = value; }
 
         public int getStartTimeoutSec() {
             return startTimeoutSec;
@@ -641,6 +649,45 @@ public class IsupProperties {
 
     /** 出库包裹录像定时同步 */
     public static class WaybillVideo {
+        /** 显式优先任务清单的去重上限，限制每次优先查询的大小。 */
+        public static final int MAX_PRIORITY_IDS = 256;
+
+        /** 可选优先录像行 ID，最多 {@value #MAX_PRIORITY_IDS} 个；只改变读取顺序，不放宽领取、重试或媒体校验。 */
+        private List<String> priorityIds = List.of();
+
+        /** 当天与历史按 3:1 公平调度；开启后替代静态 priorityIds，不改变业务状态或录像可选性。 */
+        private boolean fairSchedulingEnabled;
+        public boolean isFairSchedulingEnabled() { return fairSchedulingEnabled; }
+        public void setFairSchedulingEnabled(boolean value) { fairSchedulingEnabled = value; }
+
+        /** 仅为明确指定的设备启用录像文件边界保护；空值保持原下载行为。 */
+        private String boundaryGuardDevice = "";
+
+        public String getBoundaryGuardDevice() { return boundaryGuardDevice; }
+        public void setBoundaryGuardDevice(String value) {
+            boundaryGuardDevice = value == null ? "" : value.trim();
+        }
+
+        public List<String> getPriorityIds() { return priorityIds; }
+        public void setPriorityIds(List<String> ids) { priorityIds = validatePriorityIds(ids); }
+
+        public static List<String> validatePriorityIds(List<String> ids) {
+            if (ids == null || ids.isEmpty()) return List.of();
+            java.util.LinkedHashSet<String> distinct = new java.util.LinkedHashSet<>();
+            for (String value : ids) {
+                String id = value == null ? "" : value.trim();
+                if (!id.matches("[A-Za-z0-9_-]{1,64}")) {
+                    throw new IllegalArgumentException("waybill-video.priority-ids must contain 1-64 character IDs using letters, digits, _ or -");
+                }
+                distinct.add(id);
+                if (distinct.size() > MAX_PRIORITY_IDS) {
+                    throw new IllegalArgumentException("waybill-video.priority-ids supports at most "
+                            + MAX_PRIORITY_IDS + " distinct IDs");
+                }
+            }
+            return List.copyOf(distinct);
+        }
+
         /** 单行总预算，包括排队、双路下载、校验、裁切与上传。 */
         private int rowTimeoutSeconds = 600;
         private int queryTimeoutSeconds = 5;

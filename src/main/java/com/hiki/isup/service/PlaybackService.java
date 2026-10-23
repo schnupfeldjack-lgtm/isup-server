@@ -56,13 +56,21 @@ public class PlaybackService {
         LocalDateTime[] range = TimeRange.validate(request.getStartTime(), request.getEndTime());
         LocalDateTime start = range[0];
         LocalDateTime end = range[1];
+        if (java.time.Duration.between(start, end).getSeconds() > 3600) {
+            throw new IllegalArgumentException("回放时间段不能超过 3600 秒");
+        }
         int linkMode = request.getLinkMode() == null ? properties.getLinkMode() : request.getLinkMode();
+
+        if (request.isViewerLease() && sessionManager.recordingAdmissionBlocked()) {
+            throw new IllegalStateException("录像资源仍占用或释放积压，请稍后再播放");
+        }
 
         isupService.requireReady("NET_ECMS_StartPlayBack");
         DeviceInfo connection = deviceRegistry.requireConnection(deviceId, "回放");
         int lUserId = connection.getLUserId();
 
         MediaSession session = sessionManager.create(SessionType.PLAYBACK, connection, channel);
+        if (request.isViewerLease()) session.enableViewerLease();
         if (!session.tryBeginNativeOperation()) {
             throw new IllegalStateException("回放会话已取消，不能继续启动");
         }
@@ -95,7 +103,7 @@ public class PlaybackService {
             log.info("NET_ECMS_StartPlayBack 成功：deviceId={}, channel={}, startTime={}, endTime={}, sessionId={}, isupSessionId={}",
                     deviceId, channel, start, end, session.getSessionId(), isupSessionId);
 
-            session.setFfmpegProcess(ffmpegService.startHls(properties, dir, session.getSessionId()));
+            session.setFfmpegProcess(ffmpegService.startPlaybackHls(properties, dir, session.getSessionId()));
             checkStarting(session);
 
             HCISUPCMS.NET_EHOME_PUSHPLAYBACK_IN pushIn = new HCISUPCMS.NET_EHOME_PUSHPLAYBACK_IN();

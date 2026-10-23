@@ -54,12 +54,17 @@ public class PlaybackNewLinkCallback implements HCISUPStream.PLAYBACK_NEWLINK_CB
             }
 
             PlaybackDataCallback dataCallback = new PlaybackDataCallback(session, sessionManager);
+            if (handlers.putIfAbsent(lPlayBackLinkHandle, dataCallback) != null) {
+                log.error("拒绝覆盖未释放的回放链路：handle={}, sessionId={}",
+                        lPlayBackLinkHandle, session.getSessionId());
+                return false;
+            }
             if (!session.tryBeginLinkRegistration(lPlayBackLinkHandle, dataCallback,
                     () -> handlers.remove(lPlayBackLinkHandle, dataCallback))) {
+                handlers.remove(lPlayBackLinkHandle, dataCallback);
                 return false;
             }
             try {
-                handlers.put(lPlayBackLinkHandle, dataCallback);
                 if (isupSessionId >= 0) {
                     sessionManager.registerIsupSession(session, isupSessionId);
                 }
@@ -125,5 +130,17 @@ public class PlaybackNewLinkCallback implements HCISUPStream.PLAYBACK_NEWLINK_CB
 
     void release(int handle) {
         handlers.remove(handle);
+    }
+
+    public void onStreamException(int type, int userId, int handle, int error) {
+        if (type != HCISUPStream.EHOME_PLAYBACK_EXCEPTION) return;
+        PlaybackDataCallback owner = handlers.get(handle);
+        // The SDK dispatches these events through a thread pool without a session generation.
+        // Its handle is reusable and userId is zero. A late event MUST NOT stop a new owner.
+        // The per-session data deadline remains the independent authority for termination.
+        log.warn("SMS 回放异常：handle={}, sdkUserId={}, errorCode={}, currentOwner={}, currentBytes={}; "
+                        + "异步事件不能证明当前会话归属，保留会话数据超时判断",
+                handle, userId, error, owner == null ? null : owner.getSessionId(),
+                owner == null ? null : owner.getTotalBytes());
     }
 }

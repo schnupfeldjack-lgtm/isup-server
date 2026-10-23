@@ -125,21 +125,21 @@ class PlaybackServiceTest {
         when(cms.NET_ECMS_GetLastError()).thenReturn(17);
 
         assertThrows(IsupException.class, () -> service.startPlayback(playbackRequest()));
-        verify(ffmpegService, never()).startHls(any(), any(), anyString());
+        verify(ffmpegService, never()).startPlaybackHls(any(), any(), anyString());
     }
 
     @Test
     @DisplayName("先 StartPlayBack，成功后再起 ffmpeg，最后 StartPushPlayBack")
     void ffmpegStartsAfterSdkThenPush() throws Exception {
         stubSdkStartSuccess();
-        when(ffmpegService.startHls(any(), any(), anyString())).thenReturn(ffmpegProcess);
+        when(ffmpegService.startPlaybackHls(any(), any(), anyString())).thenReturn(ffmpegProcess);
         when(cms.NET_ECMS_StartPushPlayBack(anyInt(), any(), any())).thenReturn(true);
 
         service.startPlayback(playbackRequest());
 
         InOrder order = inOrder(cms, ffmpegService);
         order.verify(cms).NET_ECMS_StartPlayBack(anyInt(), any(), any());
-        order.verify(ffmpegService).startHls(any(), any(), anyString());
+        order.verify(ffmpegService).startPlaybackHls(any(), any(), anyString());
         order.verify(cms).NET_ECMS_StartPushPlayBack(anyInt(), any(), any());
     }
 

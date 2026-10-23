@@ -1,6 +1,7 @@
 package com.hiki.isup.service;
 
 import com.hiki.isup.callback.DeviceRegisterCallback;
+import com.hiki.isup.callback.CmsExceptionCallback;
 import com.hiki.isup.callback.PlaybackNewLinkCallback;
 import com.hiki.isup.callback.PreviewNewLinkCallback;
 import com.hiki.isup.config.IsupProperties;
@@ -44,6 +45,8 @@ public class IsupService implements CommandLineRunner, DisposableBean {
     private final PlaybackNewLinkCallback playbackNewLinkCallback;
     private final SessionManager sessionManager;
     private final FfmpegService ffmpegService;
+    private final CmsExceptionCallback cmsExceptionCallback;
+    private final HCISUPStream.EXCEPTION_CALLBACK streamExceptionCallback;
 
     private volatile int cmsListenHandle = -1;
     private volatile int previewListenHandle = -1;
@@ -57,6 +60,15 @@ public class IsupService implements CommandLineRunner, DisposableBean {
                        PlaybackNewLinkCallback playbackNewLinkCallback,
                        SessionManager sessionManager,
                        FfmpegService ffmpegService) {
+        this(properties, sdkLoader, deviceRegisterCallback, previewNewLinkCallback, playbackNewLinkCallback,
+                sessionManager, ffmpegService, new CmsExceptionCallback(sessionManager, null));
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public IsupService(IsupProperties properties, NativeSdkLoader sdkLoader,
+                       DeviceRegisterCallback deviceRegisterCallback, PreviewNewLinkCallback previewNewLinkCallback,
+                       PlaybackNewLinkCallback playbackNewLinkCallback, SessionManager sessionManager,
+                       FfmpegService ffmpegService, CmsExceptionCallback cmsExceptionCallback) {
         this.properties = properties;
         this.sdkLoader = sdkLoader;
         this.deviceRegisterCallback = deviceRegisterCallback;
@@ -64,6 +76,15 @@ public class IsupService implements CommandLineRunner, DisposableBean {
         this.playbackNewLinkCallback = playbackNewLinkCallback;
         this.sessionManager = sessionManager;
         this.ffmpegService = ffmpegService;
+        this.cmsExceptionCallback = cmsExceptionCallback;
+        this.streamExceptionCallback = (type, userId, handle, userData) -> {
+            try {
+                int error = sdkLoader.stream().NET_ESTREAM_GetLastError();
+                playbackNewLinkCallback.onStreamException(type, userId, handle, error);
+            } catch (Throwable error) {
+                log.error("SMS exception callback failed", error);
+            }
+        };
     }
 
     @Override
@@ -115,6 +136,15 @@ public class IsupService implements CommandLineRunner, DisposableBean {
         validateConfig();
 
         sdkLoader.load(properties);
+        // Pin before registration: native may call back even when later startup steps fail.
+        RETAINED_NATIVE_SERVICES.add(this);
+        if (!sdkLoader.stream().NET_ESTREAM_SetExceptionCallBack(0, null, streamExceptionCallback, null)) {
+            throw new IllegalStateException("Register SMS exception callback failed: "
+                    + sdkLoader.stream().NET_ESTREAM_GetLastError());
+        }
+        if (!sdkLoader.cms().NET_ECMS_SetExceptionCallBack(0, null, cmsExceptionCallback, null)) {
+            throw new IllegalStateException("Register CMS exception callback failed: " + sdkLoader.cms().NET_ECMS_GetLastError());
+        }
         // applyLocalConfig(sdkLoader.cms());  // 临时回滚：枚举值不对会搞坏 SDK 状态
 
         startCmsListen();

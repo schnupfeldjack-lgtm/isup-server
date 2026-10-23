@@ -114,7 +114,7 @@ isup:
 
   # 出库包裹录像：按在线设备和 channel_code 匹配全景/细节再上传 OSS
   waybill-video:
-    enabled: true
+    enabled: false
     # dev-test 扫 _test 表，避免动生产表 wms_outbound_waybill_video
     table: wms_outbound_waybill_video_test
     # 每分钟整点触发；上一轮未结束时不重叠启动

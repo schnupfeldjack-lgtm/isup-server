@@ -67,6 +67,288 @@ class WaybillVideoSyncServiceTest {
             "413571012796f6477fe224f4dd731d098c7edf77d94fe5010c68af69ffb156f3";
 
     @Test
+    void fairSchedulingActuallyDispatchesThreeTodayThenHistoryWithoutOldPriorityOverride() {
+        assertFalse(properties.getWaybillVideo().isFairSchedulingEnabled());
+        properties.getWaybillVideo().setFairSchedulingEnabled(true);
+        properties.getWaybillVideo().setDownloadConcurrency(1);
+        properties.getWaybillVideo().setPriorityIds(List.of("H0"));
+        when(ossService.isConfigured()).thenReturn(true);
+        var day = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Shanghai"));
+        var pending = new java.util.concurrent.CopyOnWriteArrayList<WaybillVideoRecord>();
+        for (int i=0;i<9;i++) pending.add(fairReadyRow("T"+i,day));
+        for (int i=0;i<3;i++) pending.add(fairReadyRow("H"+i,day.minusDays(1)));
+        stubFairQueue(pending);
+        var claimed = new java.util.concurrent.CopyOnWriteArrayList<String>();
+        org.mockito.Mockito.doAnswer(inv -> {
+            WaybillVideoRecord r=inv.getArgument(0); claimed.add(r.getId()); pending.remove(r); return true;
+        }).when(repository).claimSnapshot(any());
+
+        LegacyVideoSyncTestSupport.syncOnce(service);
+
+        assertEquals(List.of("T0","T1","T2","H0","T3","T4","T5","H1","T6","T7","T8","H2"),claimed);
+        verify(repository,never()).findPriorityPending(any());
+        verify(repository,never()).findPending(org.mockito.ArgumentMatchers.anyInt());
+        verify(repository,times(12)).updateStatusSnapshot(any(),eq(WaybillVideoStatus.SUCCESS));
+        verify(downloadService,never()).startPackingDownload(any(),anyLong());
+    }
+
+    @Test
+    void fairFailedCasDoesNotHideHistoryAndNoRecordIsSubmittedTwiceInARound() {
+        properties.getWaybillVideo().setFairSchedulingEnabled(true);
+        properties.getWaybillVideo().setBatchSize(1);
+        properties.getWaybillVideo().setDownloadConcurrency(1);
+        when(ossService.isConfigured()).thenReturn(true);
+        var day=java.time.LocalDate.now(java.time.ZoneId.of("Asia/Shanghai"));
+        var today=fairReadyRow("T0",day); var old=fairReadyRow("H0",day.minusDays(1));
+        var pending=new java.util.concurrent.CopyOnWriteArrayList<>(List.of(today,old));
+        stubFairQueue(pending);
+        org.mockito.Mockito.doReturn(false).when(repository).claimSnapshot(today);
+        org.mockito.Mockito.doAnswer(inv->{pending.remove(old);return true;}).when(repository).claimSnapshot(old);
+
+        LegacyVideoSyncTestSupport.syncOnce(service);
+
+        verify(repository,times(1)).claimSnapshot(today);
+        verify(repository,times(1)).claimSnapshot(old);
+        verify(repository).updateStatusSnapshot(old,WaybillVideoStatus.SUCCESS);
+        verify(repository,never()).updateStatusSnapshot(today,WaybillVideoStatus.SUCCESS);
+    }
+
+    @Test
+    void fairMidnightDiscardsCachedYesterdayRowsBeforeNextSubmission() {
+        properties.getWaybillVideo().setFairSchedulingEnabled(true);
+        properties.getWaybillVideo().setDownloadConcurrency(1);
+        when(ossService.isConfigured()).thenReturn(true);
+        var day=java.time.LocalDate.of(2026,10,21);
+        var now=new AtomicReference<>(java.time.Instant.parse("2026-10-21T15:59:59Z"));
+        java.time.Clock clock=new java.time.Clock() {
+            public java.time.ZoneId getZone(){return java.time.ZoneOffset.UTC;}
+            public java.time.Clock withZone(java.time.ZoneId z){return this;}
+            public java.time.Instant instant(){return now.get();}
+        };
+        org.springframework.test.util.ReflectionTestUtils.setField(service,"pendingScheduler",new PendingVideoScheduler(clock));
+        var pending=new java.util.concurrent.CopyOnWriteArrayList<WaybillVideoRecord>();
+        for(int i=0;i<4;i++) pending.add(fairReadyRow("T"+i,day));
+        for(int i=0;i<3;i++) pending.add(fairReadyRow("N"+i,day.plusDays(1)));
+        stubFairQueue(pending);
+        var claimed=new java.util.concurrent.CopyOnWriteArrayList<String>();
+        org.mockito.Mockito.doAnswer(inv->{
+            WaybillVideoRecord r=inv.getArgument(0); claimed.add(r.getId()); pending.remove(r);
+            now.set(java.time.Instant.parse("2026-10-21T16:00:01Z")); return true;
+        }).when(repository).claimSnapshot(any());
+
+        LegacyVideoSyncTestSupport.syncOnce(service);
+
+        assertEquals(List.of("T0","N0","N1","N2","T1","T2","T3"),claimed);
+    }
+
+    private WaybillVideoRecord fairReadyRow(String id,java.time.LocalDate day) {
+        var row=pendingRow(id); row.setStartTime(day.atTime(9,0)); row.setEndTime(day.atTime(9,1));
+        row.setVideoUrl1(verifiedUrl(row,1)); row.setVideoUrl2(verifiedUrl(row,2)); return row;
+    }
+
+    private void stubFairQueue(List<WaybillVideoRecord> pending) {
+        when(repository.findCurrentDayPending(any(),any(),org.mockito.ArgumentMatchers.anyInt())).thenAnswer(inv->{
+            LocalDateTime from=inv.getArgument(0), to=inv.getArgument(1); int limit=inv.getArgument(2);
+            return pending.stream().filter(r->!r.getStartTime().isBefore(from)&&r.getStartTime().isBefore(to)).limit(limit).toList();
+        });
+        when(repository.findHistoricalPending(any(),org.mockito.ArgumentMatchers.anyInt())).thenAnswer(inv->{
+            LocalDateTime from=inv.getArgument(0); int limit=inv.getArgument(1);
+            return pending.stream().filter(r->r.getStartTime().isBefore(from)).limit(limit).toList();
+        });
+    }
+
+    @Test
+    void boundaryGuardDeviceIsExplicitOptInAndTrimsConfiguration() {
+        assertEquals("", properties.getWaybillVideo().getBoundaryGuardDevice());
+        properties.getWaybillVideo().setBoundaryGuardDevice(" DLWH1xx ");
+        assertEquals("DLWH1xx", properties.getWaybillVideo().getBoundaryGuardDevice());
+        properties.getWaybillVideo().setBoundaryGuardDevice(null);
+        assertEquals("", properties.getWaybillVideo().getBoundaryGuardDevice());
+    }
+
+    @Test
+    void boundaryGuardMissingForOptedDeviceFailsBeforeNativeDownload() {
+        properties.getWaybillVideo().setBoundaryGuardDevice("DLWH1xx");
+        when(ossService.isConfigured()).thenReturn(true);
+        WaybillVideoRecord row = pendingRow();
+        nextPending(row);
+        when(repository.claim(row.getId())).thenReturn(true);
+
+        LegacyVideoSyncTestSupport.syncOnce(service);
+
+        verify(downloadService, never()).startPackingDownload(any(), anyLong());
+        verify(repository).updateStatus(row.getId(), WaybillVideoStatus.FAILED);
+        verify(repository, never()).updateStatus(row.getId(), WaybillVideoStatus.SUCCESS);
+    }
+
+    @Test
+    void boundaryGuardAdjustsBothChannelsBeforeDownloadAndKeepsBusinessInterval() throws Exception {
+        properties.getWaybillVideo().setBoundaryGuardDevice(" DLWH1xx ");
+        RecordingBoundaryGuard guard = org.mockito.Mockito.mock(RecordingBoundaryGuard.class);
+        service.setRecordingBoundaryGuard(guard);
+        when(ossService.isConfigured()).thenReturn(true);
+        WaybillVideoRecord row = pendingRow();
+        LocalDateTime businessStart = row.getStartTime();
+        LocalDateTime businessEnd = row.getEndTime();
+        LocalDateTime paddedStart = businessStart.minusSeconds(5);
+        LocalDateTime paddedEnd = businessEnd.plusSeconds(15);
+        LocalDateTime safeEnd = paddedEnd.plusSeconds(25);
+        nextPending(row);
+        when(repository.claim(row.getId())).thenReturn(true);
+        stubDownloadAndUpload();
+        when(guard.safeEnd(eq("DLWH1xx"), org.mockito.ArgumentMatchers.anyInt(),
+                eq(paddedStart), eq(paddedEnd), anyLong())).thenReturn(safeEnd);
+
+        LegacyVideoSyncTestSupport.syncOnce(service);
+
+        InOrder order = inOrder(guard, downloadService);
+        ArgumentCaptor<Long> deadlines = ArgumentCaptor.forClass(Long.class);
+        for (int channel : List.of(1, 2)) {
+            order.verify(guard).safeEnd(eq("DLWH1xx"), eq(channel), eq(paddedStart), eq(paddedEnd), deadlines.capture());
+            order.verify(downloadService).startPackingDownload(org.mockito.ArgumentMatchers.argThat(request ->
+                    request.getChannel() == channel
+                            && com.hiki.isup.util.TimeRange.parse(request.getStartTime(), "start").equals(paddedStart)
+                            && com.hiki.isup.util.TimeRange.parse(request.getEndTime(), "end").equals(safeEnd)),
+                    eq(deadlines.getValue()));
+        }
+        assertEquals(deadlines.getAllValues().get(0), deadlines.getAllValues().get(1));
+        verify(recordingRemuxer, times(2)).remux(any(), eq(businessStart), eq(businessEnd), eq(deadlines.getValue()));
+        assertEquals(businessStart, row.getStartTime());
+        assertEquals(businessEnd, row.getEndTime());
+        verify(repository).updateStatus(row.getId(), WaybillVideoStatus.SUCCESS);
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"", "another-device", "DLWH1"})
+    void boundaryGuardDoesNotAffectDisabledOrNonmatchingDevices(String configuredDevice) throws Exception {
+        properties.getWaybillVideo().setBoundaryGuardDevice(configuredDevice);
+        RecordingBoundaryGuard guard = org.mockito.Mockito.mock(RecordingBoundaryGuard.class);
+        service.setRecordingBoundaryGuard(guard);
+        when(ossService.isConfigured()).thenReturn(true);
+        WaybillVideoRecord row = pendingRow();
+        nextPending(row);
+        when(repository.claim(row.getId())).thenReturn(true);
+        stubDownloadAndUpload();
+
+        LegacyVideoSyncTestSupport.syncOnce(service);
+
+        org.mockito.Mockito.verifyNoInteractions(guard);
+        ArgumentCaptor<DownloadRequest> requests = ArgumentCaptor.forClass(DownloadRequest.class);
+        verify(downloadService, times(2)).startPackingDownload(requests.capture(), anyLong());
+        for (DownloadRequest request : requests.getAllValues()) {
+            assertEquals(row.getEndTime().plusSeconds(15),
+                    com.hiki.isup.util.TimeRange.parse(request.getEndTime(), "end"));
+        }
+        verify(repository).updateStatus(row.getId(), WaybillVideoStatus.SUCCESS);
+    }
+
+    @Test
+    void boundaryGuardMetadataFailurePreventsNativeDownloadAndSuccess() throws Exception {
+        properties.getWaybillVideo().setBoundaryGuardDevice("DLWH1xx");
+        RecordingBoundaryGuard guard = org.mockito.Mockito.mock(RecordingBoundaryGuard.class);
+        service.setRecordingBoundaryGuard(guard);
+        when(ossService.isConfigured()).thenReturn(true);
+        WaybillVideoRecord row = pendingRow();
+        nextPending(row);
+        when(repository.claim(row.getId())).thenReturn(true);
+        when(guard.safeEnd(eq("DLWH1xx"), eq(1), any(), any(), anyLong()))
+                .thenThrow(new java.io.IOException("recording index unavailable"));
+
+        LegacyVideoSyncTestSupport.syncOnce(service);
+
+        verify(downloadService, never()).startPackingDownload(any(), anyLong());
+        verify(recordingRemuxer, never()).remux(any(), any(), any(), anyLong());
+        verify(ossService, never()).upload(any(), anyString(), anyLong());
+        verify(repository).updateStatus(row.getId(), WaybillVideoStatus.FAILED);
+        verify(repository, never()).updateStatus(row.getId(), WaybillVideoStatus.SUCCESS);
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {true, false})
+    void boundaryGuardValidatesOriginalAndAdjustedDownloadRanges(boolean invalidOriginal) throws Exception {
+        properties.getWaybillVideo().setBoundaryGuardDevice("DLWH1xx");
+        RecordingBoundaryGuard guard = org.mockito.Mockito.mock(RecordingBoundaryGuard.class);
+        service.setRecordingBoundaryGuard(guard);
+        when(ossService.isConfigured()).thenReturn(true);
+        WaybillVideoRecord row = pendingRow();
+        if (invalidOriginal) {
+            row.setEndTime(row.getStartTime().plusHours(24));
+        } else {
+            when(guard.safeEnd(eq("DLWH1xx"), eq(1), any(), any(), anyLong()))
+                    .thenReturn(row.getStartTime().plusHours(24));
+        }
+        nextPending(row);
+        when(repository.claim(row.getId())).thenReturn(true);
+
+        LegacyVideoSyncTestSupport.syncOnce(service);
+
+        if (invalidOriginal) org.mockito.Mockito.verifyNoInteractions(guard);
+        verify(downloadService, never()).startPackingDownload(any(), anyLong());
+        verify(repository).updateStatus(row.getId(), WaybillVideoStatus.FAILED);
+    }
+
+    @Test
+    void priorityCandidatesPrecedeNormalBatchWithoutDroppingOrDuplicatingNormalRows() {
+        WaybillVideoRecord priority = pendingRow("priority-1");
+        WaybillVideoRecord normal = pendingRow("normal-1");
+        properties.getWaybillVideo().setPriorityIds(List.of(priority.getId()));
+        lenient().when(repository.findPriorityPending(List.of(priority.getId()))).thenReturn(List.of(priority));
+        when(repository.findPending(5)).thenReturn(List.of(normal, priority));
+
+        List<WaybillVideoRecord> rows = org.springframework.test.util.ReflectionTestUtils.invokeMethod(service, "samplePending");
+
+        assertEquals(List.of(priority, normal), rows);
+        verify(repository, never()).claimSnapshot(any());
+    }
+
+    @Test
+    void absentPriorityCandidatesFallBackToOriginalPendingOrdering() {
+        WaybillVideoRecord first = pendingRow("normal-1");
+        WaybillVideoRecord second = pendingRow("normal-2");
+        properties.getWaybillVideo().setPriorityIds(List.of("completed-id"));
+        lenient().when(repository.findPriorityPending(List.of("completed-id"))).thenReturn(List.of());
+        when(repository.findPending(5)).thenReturn(List.of(first, second));
+        assertEquals(List.of(first, second),
+                org.springframework.test.util.ReflectionTestUtils.invokeMethod(service, "samplePending"));
+    }
+
+    @Test
+    void defaultSelectionDoesNotQueryPriorityRows() {
+        WaybillVideoRecord row = pendingRow();
+        when(repository.findPending(5)).thenReturn(List.of(row));
+        assertEquals(List.of(row),
+                org.springframework.test.util.ReflectionTestUtils.invokeMethod(service, "samplePending"));
+        verify(repository, never()).findPriorityPending(any());
+    }
+
+    @Test
+    void priorityRetryCooldownStillLetsNormalRowCompleteThroughExistingCas() throws Exception {
+        when(ossService.isConfigured()).thenReturn(true);
+        WaybillVideoRecord priority = pendingRow("priority-cooldown");
+        WaybillVideoRecord normal = pendingRow("normal-ready");
+        normal.setVideoUrl1(verifiedUrl(normal, 1));
+        normal.setVideoUrl2(verifiedUrl(normal, 2));
+        properties.getWaybillVideo().setPriorityIds(List.of(priority.getId()));
+        var policy = new RecordingRetryPolicy(tempDir.resolve("priority-retries.properties"),
+                3, 100, 10000, 20000, 86400000, () -> 1000L);
+        assertTrue(policy.beginAttempt(priority.getId(), retryFingerprint(priority)));
+        policy.failed(priority.getId(), false, "temporary failure");
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "retryPolicy", policy);
+        lenient().when(repository.findPriorityPending(List.of(priority.getId()))).thenReturn(List.of(priority));
+        nextPending(normal);
+        lenient().when(repository.claim(priority.getId())).thenReturn(true);
+        when(repository.claim(normal.getId())).thenReturn(true);
+
+        LegacyVideoSyncTestSupport.syncOnce(service);
+
+        verify(repository).claimSnapshot(priority);
+        verify(repository).claimSnapshot(normal);
+        verify(repository).updateStatusSnapshot(normal, WaybillVideoStatus.SUCCESS);
+        verify(downloadService, never()).startPackingDownload(any(), anyLong());
+        assertEquals(1, policy.inspect(priority.getId()).attempts());
+    }
+
+    @Test
     void copiedSegmentsUseDistinctObjectVersion() {
         String key = WaybillVideoSyncService.buildRecordingObjectKey("waybill-video/", pendingRow(),
                 CameraChannel.PANORAMA, 1);
@@ -85,7 +367,7 @@ class WaybillVideoSyncServiceTest {
         nextPending(row);
         when(repository.claim(row.getId())).thenReturn(true);
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(repository).updateStatus(row.getId(), WaybillVideoStatus.SUCCESS);
         verify(downloadService, never()).startPackingDownload(any(), anyLong());
@@ -103,7 +385,7 @@ class WaybillVideoSyncServiceTest {
         nextPending(row);
         when(repository.claim(row.getId())).thenReturn(true);
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(repository).updateStatus(row.getId(), WaybillVideoStatus.SUCCESS);
         verify(downloadService, never()).startPackingDownload(any(), anyLong());
@@ -120,7 +402,7 @@ class WaybillVideoSyncServiceTest {
         when(repository.claim(row.getId())).thenReturn(true);
         stubOneChannel(2, Files.write(tempDir.resolve("detail-segment.mp4"), new byte[]{1}), segmentUrl(row, 2));
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(downloadService, times(1)).startPackingDownload(any(), anyLong());
         verify(ossService).upload(any(), eq(segmentUrl(row, 2).substring("https://oss/".length())), anyLong());
@@ -168,7 +450,7 @@ class WaybillVideoSyncServiceTest {
         when(recordingRemuxer.remux(any(), any(), any(), anyLong()))
                 .thenThrow(new java.io.IOException("remux failed"));
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         var after = policy.inspect(row.getId());
         assertEquals(LEGACY_RETRY_FINGERPRINT, after.fingerprint());
@@ -199,19 +481,19 @@ class WaybillVideoSyncServiceTest {
         when(repository.claim(row.getId())).thenReturn(true);
         when(ossService.upload(any(), anyString(), anyLong())).thenReturn(verifiedUrl(row, 1));
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         assertFalse(policy.inspect(row.getId()).quarantined(), "近期短片须进入有限退避，不能立即永久隔离");
         assertTrue(policy.inspect(row.getId()).reason().contains("RecordingDurationShortageException"));
         verify(ossService, never()).upload(any(), anyString(), anyLong());
         nextPending(row);
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
         verify(downloadService, times(1)).startPackingDownload(any(), anyLong());
 
         clock.addAndGet(1_000);
         durationMicros.set(60_000_000);
         nextPending(row);
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         var requests = ArgumentCaptor.forClass(DownloadRequest.class);
         verify(downloadService, times(2)).startPackingDownload(requests.capture(), anyLong());
@@ -232,13 +514,13 @@ class WaybillVideoSyncServiceTest {
         WaybillVideoRecord row = recentRecordingRow();
         nextPending(row);
         when(repository.claim(row.getId())).thenReturn(true);
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
         assertFalse(policy.inspect(row.getId()).quarantined());
         clock.addAndGet(1_000);
         nextPending(row);
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
         nextPending(row);
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         assertTrue(policy.inspect(row.getId()).quarantined());
         assertTrue(policy.inspect(row.getId()).reason().contains(ageLimit == 0 ? "次数耗尽" : "超过重试年龄"));
@@ -257,7 +539,7 @@ class WaybillVideoSyncServiceTest {
         nextPending(row);
         when(repository.claim(row.getId())).thenReturn(true);
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         assertTrue(policy.inspect(row.getId()).quarantined());
         assertTrue(policy.inspect(row.getId()).reason().contains("永久失败"));
@@ -271,7 +553,7 @@ class WaybillVideoSyncServiceTest {
         WaybillVideoRecord row = recentRecordingRow();
         nextPending(row);
         when(repository.claim(row.getId())).thenReturn(true);
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
         assertTrue(policy.inspect(row.getId()).quarantined());
         assertTrue(policy.inspect(row.getId()).reason().contains("永久失败"));
         verify(ossService, never()).upload(any(), anyString(), anyLong());
@@ -287,7 +569,7 @@ class WaybillVideoSyncServiceTest {
         var policy = installRealRemuxer(clock, new AtomicLong(1_000_000), 3, 86_400_000);
         nextPending(row);
         when(repository.claim(row.getId())).thenReturn(true);
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
         assertFalse(policy.inspect(row.getId()).quarantined());
         long firstAt = policy.inspect(row.getId()).firstAt();
         clock.set(System.currentTimeMillis());
@@ -296,7 +578,7 @@ class WaybillVideoSyncServiceTest {
         org.springframework.test.util.ReflectionTestUtils.setField(service, "retryPolicy", reloaded);
         nextPending(row);
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         assertEquals(firstAt, reloaded.inspect(row.getId()).firstAt());
         assertEquals(2, reloaded.inspect(row.getId()).attempts());
@@ -316,12 +598,16 @@ class WaybillVideoSyncServiceTest {
         service.close();
         properties.getWaybillVideo().setChannels(List.of(1));
         var remuxer = new RecordingRemuxer(properties, (command, deadline, parent) -> {
-            assertEquals("copy", command.get(command.indexOf("-c:v") + 1));
             if (!command.contains("-progress")) {
+                assertEquals("copy", command.get(command.indexOf("-c:v") + 1));
                 assertTrue(command.contains("-an"));
                 Files.write(Path.of(command.getLast()), new byte[]{7, 8, 9});
                 return "";
             }
+            assertFalse(command.contains("-c:v"));
+            assertTrue(command.contains("-xerror"));
+            assertEquals("passthrough", command.get(command.indexOf("-fps_mode") + 1));
+            assertEquals("demux", command.get(command.indexOf("-enc_time_base") + 1));
             return "out_time_us=" + durationMicros.get() + "\nprogress=end\n";
         });
         service = new WaybillVideoSyncService(properties, downloadService, sessionManager,
@@ -399,11 +685,11 @@ class WaybillVideoSyncServiceTest {
                         row.getStartTime().minusSeconds(5), row.getEndTime().minusSeconds(1)))
                 .thenReturn(raw);
         when(ossService.upload(any(), anyString(), anyLong())).thenReturn(verifiedUrl(row, 1));
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
         verify(ossService, never()).upload(any(), anyString(), anyLong());
         clock.addAndGet(1000);
         nextPending(row);
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         var requests = ArgumentCaptor.forClass(DownloadRequest.class);
         verify(downloadService, times(2)).startPackingDownload(requests.capture(), anyLong());
@@ -433,7 +719,7 @@ class WaybillVideoSyncServiceTest {
             return null;
         }).when(sessionManager).discardDownload("task-1");
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         Path evidence = tempDir.resolve("recording-failures/structure.ps");
         assertTrue(Files.isRegularFile(evidence), "校验失败必须在清理前保留有界原始样本");
@@ -453,7 +739,7 @@ class WaybillVideoSyncServiceTest {
         when(recordingRemuxer.remux(any(), any(), any(), anyLong()))
                 .thenThrow(new RecordingValidationException("原始 PS 时间戳不可信"));
 
-        assertDoesNotThrow(service::syncOnce);
+        assertDoesNotThrow(() -> LegacyVideoSyncTestSupport.syncOnce(service));
 
         verify(ossService, never()).upload(any(), anyString(), anyLong());
         verify(sessionManager).discardDownload("task-1");
@@ -563,7 +849,7 @@ class WaybillVideoSyncServiceTest {
     @Test
     void globalResourceBlockDoesNotClaimOrConsumeOrderAttempt() {
         when(sessionManager.recordingAdmissionBlocked()).thenReturn(true);
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
         org.mockito.Mockito.verifyNoInteractions(repository, downloadService, ossService);
         assertFalse(Files.exists(tempDir.resolve("waybill-video-retries.properties")));
     }
@@ -574,7 +860,7 @@ class WaybillVideoSyncServiceTest {
         when(ossService.isConfigured()).thenReturn(true);
         WaybillVideoRecord row = pendingRow();
         nextPending(row);
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
         verify(repository, never()).claim(anyString());
         assertTrue(org.mockito.Mockito.mockingDetails(repository).getInvocations().stream()
                 .anyMatch(call -> call.getMethod().getName().equals("claimSnapshot")
@@ -592,7 +878,7 @@ class WaybillVideoSyncServiceTest {
         when(ossService.upload(any(), anyString(), anyLong())).thenReturn("https://oss/first.mp4");
         // 领取后订单被修改，第一次 URL CAS 已不能匹配。
         org.mockito.Mockito.doReturn(false).when(repository).updateUrlSnapshot(any(), any(), any());
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
         verify(ossService, times(1)).upload(any(), anyString(), anyLong());
         verify(repository, never()).updateStatusSnapshot(any(), any());
         assertNull(row.getVideoUrl1());
@@ -623,7 +909,7 @@ class WaybillVideoSyncServiceTest {
             assertEquals(WaybillVideoStatus.SUCCESS, inv.getArgument(1));
             return true;
         }).when(repository).updateStatusSnapshot(any(), any());
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
         assertEquals(2, calls.get());
         verify(repository).updateStatusSnapshot(row, WaybillVideoStatus.SUCCESS);
         verify(repository, never()).claim(anyString());
@@ -643,16 +929,16 @@ class WaybillVideoSyncServiceTest {
         WaybillVideoRecord row = pendingRow("id");
         when(repository.findById("id")).thenReturn(row);
         org.junit.jupiter.api.Assertions.assertThrows(WaybillVideoSyncService.RecoveryConflictException.class,
-                () -> service.releaseRetry("id", before.revision(), "fp", "确认录像已经补齐"));
+                () -> LegacyVideoSyncTestSupport.releaseRetry(service, "id", before.revision(), "fp", "确认录像已经补齐"));
         row.setStatus("FAILED");
         org.junit.jupiter.api.Assertions.assertThrows(WaybillVideoSyncService.RecoveryConflictException.class,
-                () -> service.releaseRetry("id", "stale", "fp", "确认录像已经补齐"));
-        service.releaseRetry("id", before.revision(), "fp", "确认录像已经补齐");
+                () -> LegacyVideoSyncTestSupport.releaseRetry(service, "id", "stale", "fp", "确认录像已经补齐"));
+        LegacyVideoSyncTestSupport.releaseRetry(service, "id", before.revision(), "fp", "确认录像已经补齐");
         assertTrue(policy.inspect("id").recoveryPending());
         assertEquals(1, policy.inspect("id").recoveryAudit().size());
         assertEquals(1, policy.inspect("id").totalAttempts());
         org.junit.jupiter.api.Assertions.assertThrows(WaybillVideoSyncService.RecoveryConflictException.class,
-                () -> service.releaseRetry("id", before.revision(), "fp", "重复请求"));
+                () -> LegacyVideoSyncTestSupport.releaseRetry(service, "id", before.revision(), "fp", "重复请求"));
         verify(repository, never()).updateStatusSnapshot(any(), any());
         org.mockito.Mockito.verifyNoInteractions(downloadService, ossService, channelService);
     }
@@ -661,7 +947,7 @@ class WaybillVideoSyncServiceTest {
     void recoveryWhileSyncRunningNeverReadsOrWritesOrder() {
         org.springframework.test.util.ReflectionTestUtils.setField(service, "running", true);
         org.junit.jupiter.api.Assertions.assertThrows(WaybillVideoSyncService.RecoveryConflictException.class,
-                () -> service.releaseRetry("id", "rev", "fp", "原因"));
+                () -> LegacyVideoSyncTestSupport.releaseRetry(service, "id", "rev", "fp", "原因"));
         org.mockito.Mockito.verifyNoInteractions(repository, downloadService);
     }
 
@@ -741,7 +1027,7 @@ class WaybillVideoSyncServiceTest {
         nextPending(row);
         when(repository.claim(row.getId())).thenReturn(true);
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(downloadService, never()).startPackingDownload(any(), anyLong());
         verify(repository).updateStatus(row.getId(), WaybillVideoStatus.FAILED);
@@ -754,14 +1040,14 @@ class WaybillVideoSyncServiceTest {
         WaybillVideoRecord row = pendingRow();
         nextPending(row);
         when(repository.claim(row.getId())).thenReturn(true);
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
         verify(downloadService, never()).startPackingDownload(any(), anyLong());
 
         when(channelService.listChannels("DLWH1xx")).thenReturn(List.of(
                 new DeviceChannel(1, "打包台1全景"), new DeviceChannel(2, "打包台1细节")));
         nextPending(row);
         stubDownloadAndUpload();
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(downloadService, times(2)).startPackingDownload(any(), anyLong());
         verify(repository).updateStatus(row.getId(), WaybillVideoStatus.SUCCESS);
@@ -778,7 +1064,7 @@ class WaybillVideoSyncServiceTest {
         when(recordingRemuxer.remux(any(MediaSession.class), eq(row.getStartTime()), eq(row.getEndTime()), anyLong()))
                 .thenReturn(exact);
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(recordingRemuxer, times(2)).remux(any(MediaSession.class), eq(row.getStartTime()), eq(row.getEndTime()), anyLong());
         verify(ossService, times(2)).upload(eq(exact), anyString(), anyLong());
@@ -804,7 +1090,7 @@ class WaybillVideoSyncServiceTest {
         when(recordingRemuxer.remux(eq(session), any(), any(), anyLong())).thenReturn(exact);
         when(ossService.upload(eq(exact), anyString(), anyLong())).thenReturn(verifiedUrl(row, 1));
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(repository).updateStatus(row.getId(), WaybillVideoStatus.SUCCESS);
         verify(ossService).upload(eq(exact), anyString(), anyLong());
@@ -823,7 +1109,7 @@ class WaybillVideoSyncServiceTest {
             return Path.of(((MediaSession) inv.getArgument(0)).getRawFilePath());
         });
 
-        assertTimeoutPreemptively(Duration.ofSeconds(3), service::syncOnce);
+        assertTimeoutPreemptively(Duration.ofSeconds(3), () -> LegacyVideoSyncTestSupport.syncOnce(service));
 
         verify(downloadService, times(1)).startPackingDownload(any(), anyLong());
         verify(ossService, never()).upload(any(), anyString(), anyLong());
@@ -838,7 +1124,7 @@ class WaybillVideoSyncServiceTest {
         nextPending(row);
         when(repository.claim(row.getId())).thenReturn(true);
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(downloadService, never()).startPackingDownload(any(), anyLong());
         verify(ossService, never()).upload(any(), anyString(), anyLong());
@@ -860,7 +1146,7 @@ class WaybillVideoSyncServiceTest {
             return Path.of(session.getFilePath());
         });
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(ossService, never()).upload(any(), anyString(), anyLong());
         verify(repository, never()).updateUrl(anyString(), any(), anyString());
@@ -881,7 +1167,7 @@ class WaybillVideoSyncServiceTest {
         nextPending(row);
         when(repository.claim(row.getId())).thenReturn(true);
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(repository, never()).updateStatus(row.getId(), WaybillVideoStatus.SUCCESS);
         verify(repository).updateStatus(row.getId(), WaybillVideoStatus.FAILED);
@@ -896,7 +1182,7 @@ class WaybillVideoSyncServiceTest {
         row.setVideoUrl2("https://oss/" + OssService.buildObjectKey("waybill-video/packing-window-v2/", row.getId(), 2, row.getStartTime()));
         nextPending(row);
         when(repository.claim(row.getId())).thenReturn(true);
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
         verify(repository).updateStatus(row.getId(), WaybillVideoStatus.FAILED);
         verify(downloadService, never()).startPackingDownload(any(), anyLong());
     }
@@ -910,7 +1196,7 @@ class WaybillVideoSyncServiceTest {
         row.setStartTime(row.getStartTime().plusSeconds(1));
         nextPending(row);
         when(repository.claim(row.getId())).thenReturn(true);
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
         verify(repository).updateStatus(row.getId(), WaybillVideoStatus.FAILED);
         verify(repository, never()).updateStatus(row.getId(), WaybillVideoStatus.SUCCESS);
         verify(downloadService, never()).startPackingDownload(any(), anyLong());
@@ -926,7 +1212,7 @@ class WaybillVideoSyncServiceTest {
                 new DeviceChannel(3, "打包台1全景"), new DeviceChannel(4, "打包台1细节")));
         nextPending(row);
         when(repository.claim(row.getId())).thenReturn(true);
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
         verify(repository).updateStatus(row.getId(), WaybillVideoStatus.FAILED);
         verify(repository, never()).updateStatus(row.getId(), WaybillVideoStatus.SUCCESS);
         verify(downloadService, never()).startPackingDownload(any(), anyLong());
@@ -943,10 +1229,10 @@ class WaybillVideoSyncServiceTest {
         when(repository.claim(row.getId())).thenReturn(true);
         when(repository.updateStatus(row.getId(), WaybillVideoStatus.SUCCESS))
                 .thenThrow(new IllegalStateException("temporary status write failure")).thenReturn(true);
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
         nextPending(row);
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(repository, times(2)).updateStatus(row.getId(), WaybillVideoStatus.SUCCESS);
         verify(downloadService, never()).startPackingDownload(any(), anyLong());
@@ -961,7 +1247,7 @@ class WaybillVideoSyncServiceTest {
         row.setVideoUrl2("https://oss/waybill-video/packing-window-v4/2026/09/20/another_ch2.mp4");
         nextPending(row);
         when(repository.claim(row.getId())).thenReturn(true);
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
         verify(repository, never()).updateStatus(row.getId(), WaybillVideoStatus.SUCCESS);
         verify(repository).updateStatus(row.getId(), WaybillVideoStatus.FAILED);
     }
@@ -985,7 +1271,7 @@ class WaybillVideoSyncServiceTest {
             for (MediaSession session : prepared) assertFalse(session.beginFileCleanup());
             return "https://oss/" + inv.getArgument(1);
         });
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
         for (MediaSession session : prepared) assertTrue(session.beginFileCleanup());
         verify(repository).updateStatus(row.getId(), WaybillVideoStatus.SUCCESS);
     }
@@ -1011,12 +1297,12 @@ class WaybillVideoSyncServiceTest {
             return "https://oss/" + key;
         });
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
         assertEquals(verifiedUrl(row, 1), row.getVideoUrl1());
         assertNull(row.getVideoUrl2());
         retryClock.addAndGet(100);
         nextPending(row);
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(downloadService, times(3)).startPackingDownload(any(), anyLong());
         verify(ossService, times(1)).upload(any(), eq(verifiedUrl(row, 1).substring("https://oss/".length())), anyLong());
@@ -1037,7 +1323,7 @@ class WaybillVideoSyncServiceTest {
         when(recordingRemuxer.remux(any(MediaSession.class), any(LocalDateTime.class), any(LocalDateTime.class), anyLong()))
                 .thenThrow(new java.io.IOException("缺少末帧覆盖"));
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(ossService, never()).upload(any(), anyString(), anyLong());
         verify(repository, never()).updateUrl(anyString(), any(), anyString());
@@ -1051,7 +1337,7 @@ class WaybillVideoSyncServiceTest {
         when(ossService.isConfigured()).thenReturn(true);
         when(repository.findPending(5)).thenReturn(List.of());
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         InOrder order = inOrder(repository);
         order.verify(repository).recoverStaleProcessing(10);
@@ -1068,7 +1354,7 @@ class WaybillVideoSyncServiceTest {
         when(repository.findPending(5)).thenReturn(List.of(pendingRow()));
         when(channelService.listChannels("DLWH1xx")).thenThrow(new IllegalStateException("offline"));
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         InOrder order = inOrder(repository, channelService);
         order.verify(repository).findPending(5);
@@ -1082,7 +1368,7 @@ class WaybillVideoSyncServiceTest {
     void skipWhenOssNotConfigured() {
         when(ossService.isConfigured()).thenReturn(false);
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(repository).recoverStaleProcessing(10);
         verify(repository, never()).recoverFailedForRetry(org.mockito.ArgumentMatchers.anyInt(),
@@ -1099,7 +1385,7 @@ class WaybillVideoSyncServiceTest {
         row.setChannelCode("  ");
         nextPending(row);
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(repository, never()).claim(anyString());
         verify(downloadService, never()).startPackingDownload(any(), anyLong());
@@ -1112,7 +1398,7 @@ class WaybillVideoSyncServiceTest {
         nextPending(pendingRow());
         when(repository.claim("2101588195825704961")).thenReturn(false);
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(downloadService, never()).startPackingDownload(any(), anyLong());
     }
@@ -1126,7 +1412,7 @@ class WaybillVideoSyncServiceTest {
         when(repository.claim(row.getId())).thenReturn(true);
         stubDownloadAndUpload();
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         ArgumentCaptor<DownloadRequest> requests = ArgumentCaptor.forClass(DownloadRequest.class);
         verify(downloadService, org.mockito.Mockito.times(2)).startPackingDownload(requests.capture(), anyLong());
@@ -1166,7 +1452,7 @@ class WaybillVideoSyncServiceTest {
         Path raw = Files.write(tempDir.resolve("raw.mp4"), new byte[]{1, 2, 3});
         stubOneChannel(1, raw, "https://oss/packing-window-v4/ch1.mp4");
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(ossService).upload(eq(raw), contains("_ch1.mp4"), anyLong());
         verify(repository).updateUrl(row.getId(), CameraChannel.PANORAMA, "https://oss/packing-window-v4/ch1.mp4");
@@ -1184,7 +1470,7 @@ class WaybillVideoSyncServiceTest {
         Path file = Files.write(tempDir.resolve("ch2.mp4"), new byte[]{1, 2, 3});
         stubOneChannel(2, file, "https://oss/packing-window-v4/ch2.mp4");
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         ArgumentCaptor<DownloadRequest> requests = ArgumentCaptor.forClass(DownloadRequest.class);
         verify(downloadService, org.mockito.Mockito.times(1)).startPackingDownload(requests.capture(), anyLong());
@@ -1213,7 +1499,7 @@ class WaybillVideoSyncServiceTest {
         when(ossService.upload(any(), contains("_ch1"), anyLong())).thenReturn("https://oss/packing-window-v4/ch1.mp4");
         when(ossService.upload(any(), contains("_ch2"), anyLong())).thenReturn("https://oss/packing-window-v4/ch2.mp4");
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         ArgumentCaptor<DownloadRequest> requests = ArgumentCaptor.forClass(DownloadRequest.class);
         verify(downloadService, times(2)).startPackingDownload(requests.capture(), anyLong());
@@ -1235,7 +1521,7 @@ class WaybillVideoSyncServiceTest {
         when(repository.claim(row.getId())).thenReturn(true);
 
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(downloadService, never()).startPackingDownload(any(), anyLong());
         verify(repository, never()).updateUrl(anyString(), any(), anyString());
@@ -1255,7 +1541,7 @@ class WaybillVideoSyncServiceTest {
         when(repository.claim(row.getId())).thenReturn(true);
         when(repository.updateStatus(row.getId(), WaybillVideoStatus.SUCCESS)).thenReturn(false);
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         assertTrue(output.getOut().contains("成功=0, 失败=0, 跳过=1, 异常=0, 未完成=0"));
         verify(downloadService, never()).startPackingDownload(any(), anyLong());
@@ -1267,7 +1553,7 @@ class WaybillVideoSyncServiceTest {
         when(ossService.isConfigured()).thenReturn(true);
         when(deviceRegistry.onlineDeviceIds()).thenReturn(List.of());
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(repository, never()).findPending(org.mockito.ArgumentMatchers.anyInt());
         verify(downloadService, never()).startPackingDownload(any(), anyLong());
@@ -1283,7 +1569,7 @@ class WaybillVideoSyncServiceTest {
 
         when(downloadService.startPackingDownload(any(), anyLong())).thenThrow(new RuntimeException("通道1下载失败"));
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(repository, never()).updateUrl(anyString(), any(), anyString());
         verify(ossService, never()).upload(any(), anyString(), anyLong());
@@ -1309,7 +1595,7 @@ class WaybillVideoSyncServiceTest {
         session.setError("设备无这段录像");
         when(sessionManager.awaitFinished(eq("task-2"), anyLong())).thenReturn(session);
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(ossService, never()).upload(any(), any(), anyLong());
         verify(sessionManager, never()).discardDownload(anyString());
@@ -1324,7 +1610,7 @@ class WaybillVideoSyncServiceTest {
         when(repository.findFailedForRetry(30, 5, 0)).thenReturn(List.of());
         when(repository.findPending(5)).thenReturn(List.of());
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         InOrder order = inOrder(repository);
         order.verify(repository).recoverStaleProcessing(10);
@@ -1375,11 +1661,11 @@ class WaybillVideoSyncServiceTest {
         when(repository.claim(anyString())).thenAnswer(inv -> pending.removeIf(row -> row.getId().equals(inv.getArgument(0))));
 
         if (uncertainFirstUpdate) {
-            org.junit.jupiter.api.Assertions.assertThrows(org.springframework.dao.DataAccessResourceFailureException.class, service::syncOnce);
+            org.junit.jupiter.api.Assertions.assertThrows(org.springframework.dao.DataAccessResourceFailureException.class, () -> LegacyVideoSyncTestSupport.syncOnce(service));
         } else {
-            service.syncOnce();
+            LegacyVideoSyncTestSupport.syncOnce(service);
         }
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         assertEquals(List.of("retry-1", "retry-2", "retry-3", "retry-4", "retry-5"), selectedPages.get(0));
         assertEquals(List.of("retry-6", "retry-7", "retry-8", "retry-9", "retry-10"), selectedPages.get(1));
@@ -1398,7 +1684,7 @@ class WaybillVideoSyncServiceTest {
         when(repository.claim("id-2")).thenReturn(true);
         stubDownloadAndUpload();
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(repository).claim("id-1");
         verify(repository).claim("id-2");
@@ -1442,7 +1728,7 @@ class WaybillVideoSyncServiceTest {
         });
         when(ossService.upload(any(), any(), anyLong())).thenReturn("https://oss/packing-window-v4/ok.mp4");
 
-        assertTimeoutPreemptively(Duration.ofSeconds(8), () -> service.syncOnce());
+        assertTimeoutPreemptively(Duration.ofSeconds(8), () -> LegacyVideoSyncTestSupport.syncOnce(service));
 
         verify(repository, times(4)).updateStatus(anyString(), eq(WaybillVideoStatus.SUCCESS));
         verify(downloadService, times(8)).startPackingDownload(any(), anyLong());
@@ -1504,7 +1790,7 @@ class WaybillVideoSyncServiceTest {
             return true;
         });
         ExecutorService runner = Executors.newSingleThreadExecutor();
-        Future<?> execution = runner.submit(service::syncOnce);
+        Future<?> execution = runner.submit(() -> LegacyVideoSyncTestSupport.syncOnce(service));
         try {
             assertTrue(firstStarted.await(5, TimeUnit.SECONDS), "首条长下载应启动");
             assertTrue(secondFinished.await(5, TimeUnit.SECONDS), "第二条应先完成并释放槽位");
@@ -1541,7 +1827,7 @@ class WaybillVideoSyncServiceTest {
         });
         stubDownloadAndUpload();
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(repository).claim("id-1");
         verify(repository, never()).claim("id-2");
@@ -1574,7 +1860,7 @@ class WaybillVideoSyncServiceTest {
         running.setStatus(SessionStatus.RUNNING);
         when(sessionManager.awaitFinished(eq("task-timeout"), anyLong())).thenReturn(running);
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         ArgumentCaptor<Long> timeout = ArgumentCaptor.forClass(Long.class);
         verify(sessionManager).awaitFinished(eq("task-timeout"), timeout.capture());
@@ -1610,7 +1896,7 @@ class WaybillVideoSyncServiceTest {
         });
 
         try {
-            assertDoesNotThrow(service::syncOnce);
+            assertDoesNotThrow(() -> LegacyVideoSyncTestSupport.syncOnce(service));
             assertTrue(persisted.get(), "中断后的失败状态必须真正写入");
             verify(ossService, never()).upload(any(), any(), anyLong());
         } finally {
@@ -1651,7 +1937,7 @@ class WaybillVideoSyncServiceTest {
         });
 
         try {
-            assertDoesNotThrow(service::syncOnce);
+            assertDoesNotThrow(() -> LegacyVideoSyncTestSupport.syncOnce(service));
             assertTrue(urlPersisted.get(), "已经成功上传的 URL 必须保留");
             assertTrue(statusPersisted.get(), "未完成的另一通道应使本行结束为 FAILED");
             verify(downloadService, times(2)).startPackingDownload(any(), anyLong());
@@ -1675,7 +1961,7 @@ class WaybillVideoSyncServiceTest {
         when(repository.updateUrl(eq(first.getId()), eq(CameraChannel.PANORAMA), anyString()))
                 .thenThrow(new IllegalStateException("database write failed"));
 
-        assertDoesNotThrow(service::syncOnce);
+        assertDoesNotThrow(() -> LegacyVideoSyncTestSupport.syncOnce(service));
 
         verify(repository).updateStatus(first.getId(), WaybillVideoStatus.FAILED);
         verify(repository).claim(second.getId());
@@ -1697,7 +1983,7 @@ class WaybillVideoSyncServiceTest {
         nextPending(row);
         when(repository.claim(row.getId())).thenReturn(true);
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(repository).updateStatus(row.getId(), WaybillVideoStatus.SUCCESS);
         verify(downloadService, never()).startPackingDownload(any(), anyLong());
@@ -1744,7 +2030,7 @@ class WaybillVideoSyncServiceTest {
         ExecutorService runner = Executors.newSingleThreadExecutor();
         Future<?> execution = runner.submit(() -> {
             try {
-                service.syncOnce();
+                LegacyVideoSyncTestSupport.syncOnce(service);
             } finally {
                 runReturned.countDown();
             }
@@ -1776,7 +2062,7 @@ class WaybillVideoSyncServiceTest {
         when(repository.findPending(5)).thenReturn(List.of(row), List.of(row), List.of());
         when(repository.claim(row.getId())).thenReturn(true);
 
-        service.syncOnce();
+        LegacyVideoSyncTestSupport.syncOnce(service);
 
         verify(repository, times(1)).claim(row.getId());
         verify(repository, times(1)).updateStatus(row.getId(), WaybillVideoStatus.SUCCESS);
@@ -1795,7 +2081,7 @@ class WaybillVideoSyncServiceTest {
         when(repository.updateStatus(row.getId(), WaybillVideoStatus.SUCCESS))
                 .thenThrow(new IllegalStateException("success status write failed"));
 
-        assertDoesNotThrow(service::syncOnce);
+        assertDoesNotThrow(() -> LegacyVideoSyncTestSupport.syncOnce(service));
 
         InOrder finalization = inOrder(repository);
         finalization.verify(repository).updateStatus(row.getId(), WaybillVideoStatus.SUCCESS);
@@ -1816,7 +2102,7 @@ class WaybillVideoSyncServiceTest {
         when(repository.updateStatus(row.getId(), WaybillVideoStatus.FAILED))
                 .thenThrow(new IllegalStateException("failed status write failed"));
 
-        assertDoesNotThrow(service::syncOnce);
+        assertDoesNotThrow(() -> LegacyVideoSyncTestSupport.syncOnce(service));
 
         InOrder finalization = inOrder(repository);
         finalization.verify(repository).updateStatus(row.getId(), WaybillVideoStatus.SUCCESS);
@@ -1839,7 +2125,7 @@ class WaybillVideoSyncServiceTest {
                 finalizationStarted, releaseFinalization, persisted);
         Thread scheduler = new Thread(() -> {
             try {
-                service.syncOnce();
+                LegacyVideoSyncTestSupport.syncOnce(service);
             } catch (Throwable failure) {
                 schedulerFailure.set(failure);
             } finally {
@@ -1886,7 +2172,7 @@ class WaybillVideoSyncServiceTest {
                 finalizationStarted, releaseFinalization, persisted);
         Thread scheduler = new Thread(() -> {
             try {
-                service.syncOnce();
+                LegacyVideoSyncTestSupport.syncOnce(service);
             } catch (Throwable failure) {
                 schedulerFailure.set(failure);
             }
@@ -1947,10 +2233,10 @@ class WaybillVideoSyncServiceTest {
         }).when(blocking).syncOnce();
 
         WaybillVideoSyncJob job = new WaybillVideoSyncJob(blocking);
-        Thread first = new Thread(job::run, "job-1");
+        Thread first = new Thread(() -> org.springframework.test.util.ReflectionTestUtils.invokeMethod(job, "legacyRun"), "job-1");
         first.start();
         assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS));
-        job.run();
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(job, "legacyRun");
         release.countDown();
         first.join(5000);
 
